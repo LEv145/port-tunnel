@@ -1,0 +1,9 @@
+[project]
+name = "port-tunner-client"
+version = "0.1.0"
+dependencies = [
+    "transmitters",
+]
+
+[tool.uv.sources]
+transmitters = { workspace = true }

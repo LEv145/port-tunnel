@@ -1,0 +1,13 @@
+[project]
+name = "port-tunnel"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "colorlog>=6.10.1",
+    "pydantic>=2.13.4",
+    "typer>=0.26.7",
+]
+
+[tool.uv.workspace]
+members = ["src/*"]
