@@ -68,41 +68,6 @@ async def async_main(
         )
 
 
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    try:
-        while True:
-            data = await reader.read(64 * 1024)
-            if not data:
-                break
-            writer.write(data)
-            await writer.drain()
-    except (ConnectionError, asyncio.IncompleteReadError):
-        pass
-    finally:
-        writer.close()
-
-
-async def _bridge(
-    left_reader: asyncio.StreamReader,
-    left_writer: asyncio.StreamWriter,
-    right_reader: asyncio.StreamReader,
-    right_writer: asyncio.StreamWriter,
-) -> None:
-    task1 = asyncio.create_task(_pipe(left_reader, right_writer))
-    task2 = asyncio.create_task(_pipe(right_reader, left_writer))
-
-    done, pending = await asyncio.wait(
-        {task1, task2},
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-
-    for task in pending:
-        task.cancel()
-
-    left_writer.close()
-    right_writer.close()
-
-
 async def _handle_control_or_data(
     transmitter: ABCTransmitter,
     reader: asyncio.StreamReader,
@@ -179,6 +144,41 @@ async def _handle_public_connection(
             "connection_id": connection_id,
         }
     )
+
+
+async def _bridge(
+    left_reader: asyncio.StreamReader,
+    left_writer: asyncio.StreamWriter,
+    right_reader: asyncio.StreamReader,
+    right_writer: asyncio.StreamWriter,
+) -> None:
+    task1 = asyncio.create_task(_pipe(left_reader, right_writer))
+    task2 = asyncio.create_task(_pipe(right_reader, left_writer))
+
+    done, pending = await asyncio.wait(
+        {task1, task2},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    for task in pending:
+        task.cancel()
+
+    left_writer.close()
+    right_writer.close()
+
+
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        while True:
+            data = await reader.read(64 * 1024)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        writer.close()
 
 
 if __name__ == "__main__":

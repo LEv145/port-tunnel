@@ -41,11 +41,14 @@ async def async_main(
         control_port,
     )
 
-    await transmitter.send_json(writer, {
-        "type": "register",
-        "local_port": local_port,
-        "public_port": public_port,
-    })
+    await transmitter.send_json(
+        writer,
+        {
+            "type": "register",
+            "local_port": local_port,
+            "public_port": public_port,
+        },
+    )
 
     response = await transmitter.read_json(reader)
     _log.info(f"[client] registered: {response}")
@@ -68,18 +71,40 @@ async def async_main(
             _log.info(f"[client] unknown message: {message}")
 
 
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def _handle_new_connection(
+    transmitter: ABCTransmitter,
+    server_host: str,
+    control_port: int,
+    local_host: str,
+    local_port: int,
+    connection_id: str,
+) -> None:
+    _log.info(f"[client] new connection_id={connection_id}")
+
+    server_reader, server_writer = await asyncio.open_connection(
+        server_host,
+        control_port,
+    )
+
+    await transmitter.send_json(
+        server_writer,
+        {
+            "type": "data",
+            "connection_id": connection_id,
+        }
+    )
+
     try:
-        while True:
-            data = await reader.read(64 * 1024)
-            if not data:
-                break
-            writer.write(data)
-            await writer.drain()
-    except (ConnectionError, asyncio.IncompleteReadError):
-        pass
-    finally:
-        writer.close()
+        local_reader, local_writer = await asyncio.open_connection(
+            local_host,
+            local_port,
+        )
+    except Exception as error:
+        _log.info(f"[client] cannot connect to local service: {error}")
+        server_writer.close()
+        return
+
+    await _bridge(server_reader, server_writer, local_reader, local_writer)
 
 
 async def _bridge(
@@ -103,37 +128,18 @@ async def _bridge(
     right_writer.close()
 
 
-async def _handle_new_connection(
-    transmitter: ABCTransmitter,
-    server_host: str,
-    control_port: int,
-    local_host: str,
-    local_port: int,
-    connection_id: str,
-) -> None:
-    _log.info(f"[client] new connection_id={connection_id}")
-
-    server_reader, server_writer = await asyncio.open_connection(
-        server_host,
-        control_port,
-    )
-
-    await transmitter.send_json(server_writer, {
-        "type": "data",
-        "connection_id": connection_id,
-    })
-
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
-        local_reader, local_writer = await asyncio.open_connection(
-            local_host,
-            local_port,
-        )
-    except Exception as error:
-        _log.info(f"[client] cannot connect to local service: {error}")
-        server_writer.close()
-        return
-
-    await _bridge(server_reader, server_writer, local_reader, local_writer)
+        while True:
+            data = await reader.read(64 * 1024)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        writer.close()
 
 
 if __name__ == "__main__":
