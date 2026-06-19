@@ -5,8 +5,8 @@ requires-python = ">=3.14"
 [manifest]
 members = [
     "port-tunnel",
-    "port-tunner-client",
-    "port-tunner-server",
+    "port-tunnel-client",
+    "port-tunnel-server",
     "transmitters",
 ]
 
@@ -88,7 +88,7 @@ requires-dist = [
 ]
 
 [[package]]
-name = "port-tunner-client"
+name = "port-tunnel-client"
 version = "0.1.0"
 source = { virtual = "src/client" }
 dependencies = [
@@ -99,7 +99,7 @@ dependencies = [
 requires-dist = [{ name = "transmitters", editable = "src/transmitters" }]
 
 [[package]]
-name = "port-tunner-server"
+name = "port-tunnel-server"
 version = "0.1.0"
 source = { virtual = "src/server" }
 dependencies = [
