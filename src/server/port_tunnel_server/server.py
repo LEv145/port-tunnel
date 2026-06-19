@@ -182,39 +182,45 @@ class TCPTunnelServer:
             await self._close_writer(writer)
             return
 
-        await self._transmitter.send_json(writer, {
-            "type": "registered",
-            "tunnel_id": tunnel_id,
-            "data_token": data_token,
-            "public_port": public_port,
-        })
+        public_task: asyncio.Task[None] | None = None
 
-        _log.info(
-            "[control] tunnel registered client_id=%s tunnel_id=%s public_port=%s",
-            client_id,
-            tunnel_id,
-            public_port,
-        )
+        try:
+            # После добавления туннеля в реестр любая ошибка должна приводить
+            # к его удалению и освобождению публичного порта.
+            await self._transmitter.send_json(writer, {
+                "type": "registered",
+                "tunnel_id": tunnel_id,
+                "data_token": data_token,
+                "public_port": public_port,
+            })
 
-        async with public_server:
-            public_task = asyncio.create_task(public_server.serve_forever())
+            _log.info(
+                "[control] tunnel registered client_id=%s tunnel_id=%s public_port=%s",
+                client_id,
+                tunnel_id,
+                public_port,
+            )
 
-            try:
-                # После регистрации control-соединение используется сервером
-                # для отправки уведомлений клиенту. Здесь мы читаем его только
-                # для обнаружения EOF - момента, когда клиент отключился.
-                while await reader.read(1024):
+            async with public_server:
+                public_task = asyncio.create_task(public_server.serve_forever())
+
+                try:
+                    # После регистрации control-соединение используется сервером
+                    # для отправки уведомлений клиенту. Здесь мы читаем его только
+                    # для обнаружения EOF - момента, когда клиент отключился.
+                    while await reader.read(1024):
+                        pass
+                except (ConnectionError, asyncio.IncompleteReadError):
+                    # Разрыв сети и принудительное завершение клиента также означают,
+                    # что туннель больше нельзя считать активным.
                     pass
-            except (ConnectionError, asyncio.IncompleteReadError):
-                # Разрыв сети и принудительное завершение клиента также означают,
-                # что туннель больше нельзя считать активным.
-                pass
-            finally:
+        finally:
+            if public_task is not None:
                 public_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await public_task
 
-                await self._unregister_tunnel(tunnel_id)
+            await self._unregister_tunnel(tunnel_id)
 
     async def _handle_public_connection(
         self,
