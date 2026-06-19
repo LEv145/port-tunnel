@@ -33,6 +33,7 @@ def main(
             control_host=control_host,
             control_port=control_port,
             public_host=public_host,
+            client_tokens=client_tokens,
         )
     )
 
