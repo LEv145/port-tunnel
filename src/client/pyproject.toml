@@ -1,5 +1,5 @@
 [project]
-name = "port-tunner-client"
+name = "port-tunnel-client"
 version = "0.1.0"
 dependencies = [
     "transmitters",
