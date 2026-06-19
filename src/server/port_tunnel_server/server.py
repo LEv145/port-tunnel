@@ -1,6 +1,7 @@
 """Серверная часть сервиса обратного TCP-туннелирования."""
 
 import asyncio
+import hmac
 import contextlib
 import secrets
 import logging
@@ -9,7 +10,8 @@ from typing import Any
 
 from transmitters import ABCTransmitter
 
-from .tcp_tunnel_registry import PendingTCPConnection, RegisteredTCPTunnel, TCPTunnelRegistry
+from .registry import PendingTCPConnection, RegisteredTCPTunnel, TCPTunnelRegistry, ABCTunnelRegistry
+from .authentication import ABCClientAuthenticator
 
 
 _log = logging.getLogger(__name__)
@@ -32,21 +34,22 @@ class TCPTunnelServer:
         self,
         *,
         transmitter: ABCTransmitter,
+        authenticator: ABCClientAuthenticator,
         control_host: str,
         control_port: int,
         public_host: str,
     ) -> None:
-        """Сохранить конфигурацию и создать пустой реестр туннелей."""
         self._transmitter = transmitter
+        self._authenticator = authenticator
         self._control_host = control_host
         self._control_port = control_port
         self._public_host = public_host
-        self._registry = TCPTunnelRegistry()
+        self._registry: ABCTunnelRegistry = TCPTunnelRegistry()
 
     async def run(self) -> None:
         """Запустить общий control-listener и обслуживать его бесконечно."""
         control_server = await asyncio.start_server(
-            self._handle_control_or_data,
+            self._handle_control,
             self._control_host,
             self._control_port,
         )
@@ -56,7 +59,7 @@ class TCPTunnelServer:
         async with control_server:
             await control_server.serve_forever()
 
-    async def _handle_control_or_data(
+    async def _handle_control(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
@@ -97,12 +100,44 @@ class TCPTunnelServer:
         сервер сообщает клиенту о новых внешних подключениях. Завершение этого
         соединения инициирует очистку публичного listener и состояния туннеля.
         """
-        public_port_raw = message.get("public_port")
-        if not isinstance(public_port_raw, int):
+        public_port = message.get("public_port")
+        client_id = message.get("client_id")
+        token = message.get("token")
+
+        if not isinstance(client_id, str) or not isinstance(token, str):
+            await self._transmitter.send_json(
+                writer,
+                {
+                    "type": "error",
+                    "code": "invalid_credentials",
+                    "message": "client_id and token must be strings",
+                },
+            )
+            await self._close_writer(writer)
+            return
+
+        if not isinstance(public_port, int):
             await self._transmitter.send_json(writer, {
                 "type": "error",
                 "message": "public_port must be int",
             })
+            await self._close_writer(writer)
+            return
+
+        if not self._authenticator.authenticate(client_id, token):
+            _log.info(
+                "[auth] registration rejected client_id=%s",
+                client_id,
+            )
+
+            await self._transmitter.send_json(
+                writer,
+                {
+                    "type": "error",
+                    "code": "unauthorized",
+                    "message": "invalid client credentials",
+                },
+            )
             await self._close_writer(writer)
             return
 
@@ -112,20 +147,23 @@ class TCPTunnelServer:
             public_server = await asyncio.start_server(
                 partial(self._handle_public_connection, tunnel_id),
                 self._public_host,
-                public_port_raw,
+                public_port,
             )
         except OSError as error:
             await self._transmitter.send_json(writer, {
                 "type": "error",
-                "message": f"cannot listen public port {public_port_raw}: {error}",
+                "message": f"cannot listen public port {public_port}: {error}",
             })
             await self._close_writer(writer)
             return
 
+        data_token = secrets.token_urlsafe(32)
         tunnel = RegisteredTCPTunnel(
             tunnel_id=tunnel_id,
+            client_id=client_id,
+            data_token=data_token,
             public_host=self._public_host,
-            public_port=public_port_raw,
+            public_port=public_port,
             control_writer=writer,
             public_server=public_server,
         )
@@ -146,10 +184,16 @@ class TCPTunnelServer:
         await self._transmitter.send_json(writer, {
             "type": "registered",
             "tunnel_id": tunnel_id,
-            "public_port": public_port_raw,
+            "data_token": data_token,
+            "public_port": public_port,
         })
 
-        _log.info(f"[control] tunnel registered tunnel_id={tunnel_id} public_port={public_port_raw}")
+        _log.info(
+            "[control] tunnel registered client_id=%s tunnel_id=%s public_port=%s",
+            client_id,
+            tunnel_id,
+            public_port,
+        )
 
         async with public_server:
             public_task = asyncio.create_task(public_server.serve_forever())
@@ -216,9 +260,29 @@ class TCPTunnelServer:
         """Сопоставить data-канал клиента с ожидающим внешним соединением."""
         tunnel_id = message.get("tunnel_id")
         connection_id = message.get("connection_id")
+        data_token = message.get("data_token")
 
         if not isinstance(tunnel_id, str) or not isinstance(connection_id, str):
             _log.info("[data] invalid tunnel_id or connection_id")
+            await self._close_writer(writer)
+            return
+
+        if not isinstance(data_token, str):
+            _log.info("[data] invalid data_token")
+            await self._close_writer(writer)
+            return
+
+        tunnel = await self._registry.get_by_id(tunnel_id)
+        if tunnel is None:
+            _log.warning("[auth] data connection rejected: unknown tunnel")
+            await self._close_writer(writer)
+            return
+
+        if not hmac.compare_digest(tunnel.data_token, data_token):
+            _log.warning(
+                "[auth] data connection rejected tunnel_id=%s",
+                tunnel_id,
+            )
             await self._close_writer(writer)
             return
 
@@ -256,6 +320,12 @@ class TCPTunnelServer:
             await self._close_writer(connection.writer)
 
         _log.info(f"[control] tunnel unregistered tunnel_id={tunnel_id}")
+
+    async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
+        """Идемпотентно инициировать закрытие TCP-потока и дождаться его."""
+        writer.close()
+        with contextlib.suppress(ConnectionError, RuntimeError):
+            await writer.wait_closed()
 
     async def _pipe(
         self,
@@ -299,9 +369,3 @@ class TCPTunnelServer:
 
         await self._close_writer(left_writer)
         await self._close_writer(right_writer)
-
-    async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
-        """Идемпотентно инициировать закрытие TCP-потока и дождаться его."""
-        writer.close()
-        with contextlib.suppress(ConnectionError, RuntimeError):
-            await writer.wait_closed()

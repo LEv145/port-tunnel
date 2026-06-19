@@ -18,17 +18,34 @@ app = typer.Typer()
 @app.command()
 def main(
     server_host: str = typer.Option(),
+    client_id: str = typer.Option(),
     control_port: int = 7000,
     local_host: str = "127.0.0.1",
     local_port: int = typer.Option(),
     public_port: int = 30001,
 ) -> None:
     """Запустить клиентский агент для одного локального TCP-сервиса."""
-    asyncio.run(async_main(**locals()))
+    token = os.environ.get("PORT_TUNNEL_TOKEN")
+    if token is None:
+        raise RuntimeError("PORT_TUNNEL_TOKEN is not configured")
+
+    asyncio.run(
+        async_main(
+            server_host=server_host,
+            client_id=client_id,
+            token=token,
+            control_port=control_port,
+            local_host=local_host,
+            local_port=local_port,
+            public_port=public_port,
+        )
+    )
 
 
 async def async_main(
     server_host: str,
+    client_id: str,
+    token: str,
     local_host: str,
     local_port: int,
     control_port: int,
@@ -47,17 +64,15 @@ async def async_main(
         control_port,
     )
 
-    await transmitter.send_json(
-        writer,
-        {
-            "type": "register",
-            "local_port": local_port,
-            "public_port": public_port,
-        },
-    )
+    await transmitter.send_json(writer, {
+        "type": "register",
+        "client_id": client_id,
+        "token": token,
+        "local_port": local_port,
+        "public_port": public_port,
+    })
 
     response = await transmitter.read_json(reader)
-    _log.info(f"[client] registered: {response}")
 
     if response.get("type") == "error":
         raise RuntimeError(response.get("message"))
@@ -65,6 +80,16 @@ async def async_main(
     tunnel_id = response.get("tunnel_id")
     if not isinstance(tunnel_id, str):
         raise RuntimeError("Server did not return tunnel_id")
+
+    data_token = response.get("data_token")
+    if not isinstance(data_token, str):
+        raise RuntimeError("Server did not return data_token")
+
+    _log.info(
+        "[client] registered tunnel_id=%s public_port=%s",
+        tunnel_id,
+        public_port,
+    )
 
     while True:
         message = await transmitter.read_json(reader)
@@ -92,6 +117,7 @@ async def async_main(
                     local_port=local_port,
                     tunnel_id=tunnel_id,
                     connection_id=connection_id,
+                    data_token=data_token,
                 )
             )
         else:
@@ -106,6 +132,7 @@ async def _handle_new_connection(
     local_port: int,
     tunnel_id: str,
     connection_id: str,
+    data_token: str,
 ) -> None:
     """Создать data-канал и связать его с локальным TCP-сервисом."""
     _log.info(f"[client] new connection_id={connection_id}")
@@ -117,14 +144,12 @@ async def _handle_new_connection(
         control_port,
     )
 
-    await transmitter.send_json(
-        server_writer,
-        {
-            "type": "data",
-            "tunnel_id": tunnel_id,
-            "connection_id": connection_id,
-        },
-    )
+    await transmitter.send_json(server_writer, {
+        "type": "data",
+        "tunnel_id": tunnel_id,
+        "connection_id": connection_id,
+        "data_token": data_token,
+    })
 
     try:
         local_reader, local_writer = await asyncio.open_connection(
