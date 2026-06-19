@@ -39,7 +39,7 @@ def main(
             local_host=local_host,
             local_port=local_port,
             public_port=public_port,
-        )
+        ),
     )
 
 
