@@ -1,3 +1,5 @@
+"""Серверная часть сервиса обратного TCP-туннелирования."""
+
 import asyncio
 import contextlib
 import secrets
@@ -7,13 +9,25 @@ from typing import Any
 
 from transmitters import ABCTransmitter
 
-from .tcp_tunnel_registry import TCPTunnelRegistry, RegisteredTCPTunnel, PendingTCPConnection
+from .tcp_tunnel_registry import PendingTCPConnection, RegisteredTCPTunnel, TCPTunnelRegistry
 
 
 _log = logging.getLogger(__name__)
 
 
 class TCPTunnelServer:
+    """Управляет control-соединениями, публичными портами и TCP-мостами.
+
+    Сервер принимает на одном control-порту два вида соединений клиента:
+
+    * `register` — долговременное управляющее соединение туннеля;
+    * `data` — отдельное соединение для одного внешнего TCP-подключения.
+
+    Для каждого зарегистрированного туннеля сервер динамически запускает
+    отдельный публичный listener. Пользовательский трафик сервер не разбирает:
+    байты копируются между внешним сокетом и data-сокетом клиента.
+    """
+
     def __init__(
         self,
         *,
@@ -22,6 +36,7 @@ class TCPTunnelServer:
         control_port: int,
         public_host: str,
     ) -> None:
+        """Сохранить конфигурацию и создать пустой реестр туннелей."""
         self._transmitter = transmitter
         self._control_host = control_host
         self._control_port = control_port
@@ -29,6 +44,7 @@ class TCPTunnelServer:
         self._registry = TCPTunnelRegistry()
 
     async def run(self) -> None:
+        """Запустить общий control-listener и обслуживать его бесконечно."""
         control_server = await asyncio.start_server(
             self._handle_control_or_data,
             self._control_host,
@@ -45,6 +61,12 @@ class TCPTunnelServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        """Классифицировать новое клиентское соединение по первому сообщению.
+
+        На одном TCP-порту принимаются и управляющие, и data-соединения.
+        Первое length-prefixed JSON-сообщение содержит поле `type`, по которому
+        соединение передаётся нужному обработчику.
+        """
         try:
             message = await self._transmitter.read_json(reader)
         except Exception:
@@ -69,6 +91,12 @@ class TCPTunnelServer:
         message: dict[str, Any],
         writer: asyncio.StreamWriter,
     ) -> None:
+        """Зарегистрировать туннель и запустить его публичный TCP-listener.
+
+        Управляющий `writer` сохраняется на всё время жизни туннеля. Через него
+        сервер сообщает клиенту о новых внешних подключениях. Завершение этого
+        соединения инициирует очистку публичного listener и состояния туннеля.
+        """
         public_port_raw = message.get("public_port")
         if not isinstance(public_port_raw, int):
             await self._transmitter.send_json(writer, {
@@ -127,6 +155,9 @@ class TCPTunnelServer:
             public_task = asyncio.create_task(public_server.serve_forever())
 
             try:
+                # Управляющее соединение является индикатором жизни клиента.
+                # В текущем MVP нет heartbeat, поэтому корутина периодически
+                # проверяет только локальное состояние writer.
                 while not writer.is_closing():
                     await asyncio.sleep(3600)
             finally:
@@ -142,6 +173,7 @@ class TCPTunnelServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        """Принять внешнего пользователя и запросить data-канал у клиента."""
         tunnel = await self._registry.get_by_id(tunnel_id)
         if tunnel is None:
             _log.info(f"[public] unknown tunnel_id={tunnel_id}")
@@ -150,6 +182,9 @@ class TCPTunnelServer:
 
         connection_id = secrets.token_hex(8)
 
+        # Внешний сокет нельзя сразу связать с локальным сервисом: сервер не
+        # имеет прямого доступа к сети клиента. Он временно сохраняется, пока
+        # клиент не создаст исходящее data-соединение.
         added = await self._registry.put_pending_public_connection(
             tunnel_id,
             connection_id,
@@ -178,6 +213,7 @@ class TCPTunnelServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        """Сопоставить data-канал клиента с ожидающим внешним соединением."""
         tunnel_id = message.get("tunnel_id")
         connection_id = message.get("connection_id")
 
@@ -207,6 +243,7 @@ class TCPTunnelServer:
         _log.info(f"[data] bridge closed tunnel_id={tunnel_id} connection_id={connection_id}")
 
     async def _unregister_tunnel(self, tunnel_id: str) -> None:
+        """Удалить туннель, закрыть listener и незавершённые подключения."""
         tunnel = await self._registry.remove(tunnel_id)
         if tunnel is None:
             return
@@ -225,6 +262,7 @@ class TCPTunnelServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        """Копировать непрозрачный поток байтов в одном направлении."""
         try:
             while True:
                 data = await reader.read(64 * 1024)
@@ -245,10 +283,11 @@ class TCPTunnelServer:
         right_reader: asyncio.StreamReader,
         right_writer: asyncio.StreamWriter,
     ) -> None:
+        """Создать двунаправленный TCP-мост между двумя соединениями."""
         task1 = asyncio.create_task(self._pipe(left_reader, right_writer))
         task2 = asyncio.create_task(self._pipe(right_reader, left_writer))
 
-        done, pending = await asyncio.wait(
+        _, pending = await asyncio.wait(
             {task1, task2},
             return_when=asyncio.FIRST_COMPLETED,
         )
@@ -262,6 +301,7 @@ class TCPTunnelServer:
         await self._close_writer(right_writer)
 
     async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
+        """Идемпотентно инициировать закрытие TCP-потока и дождаться его."""
         writer.close()
         with contextlib.suppress(ConnectionError, RuntimeError):
             await writer.wait_closed()

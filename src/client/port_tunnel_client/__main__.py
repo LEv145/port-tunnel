@@ -1,3 +1,5 @@
+"""CLI и клиентская часть обратного TCP-туннеля."""
+
 import asyncio
 import logging
 
@@ -21,6 +23,7 @@ def main(
     local_port: int = typer.Option(),
     public_port: int = 30001,
 ) -> None:
+    """Запустить клиентский агент для одного локального TCP-сервиса."""
     asyncio.run(async_main(**locals()))
 
 
@@ -31,6 +34,12 @@ async def async_main(
     control_port: int,
     public_port: int,
 ) -> None:
+    """Зарегистрировать туннель и обслуживать команды сервера.
+
+    Эта корутина поддерживает долговременное control-соединение. По каждому
+    сообщению `new_connection` она запускает отдельную задачу, создающую
+    data-соединение к серверу и соединение к локальному сервису.
+    """
     transmitter = TCPTransmitter()
 
     reader, writer = await asyncio.open_connection(
@@ -72,6 +81,8 @@ async def async_main(
                 _log.info(f"[client] invalid connection_id: {message}")
                 continue
 
+            # Задача создаётся отдельно, чтобы несколько внешних соединений
+            # одного туннеля обслуживались конкурентно.
             asyncio.create_task(
                 _handle_new_connection(
                     transmitter=transmitter,
@@ -96,8 +107,11 @@ async def _handle_new_connection(
     tunnel_id: str,
     connection_id: str,
 ) -> None:
+    """Создать data-канал и связать его с локальным TCP-сервисом."""
     _log.info(f"[client] new connection_id={connection_id}")
 
+    # Data-соединение является исходящим, поэтому проходит через NAT так же,
+    # как обычное подключение к сайту.
     server_reader, server_writer = await asyncio.open_connection(
         server_host,
         control_port,
@@ -131,10 +145,11 @@ async def _bridge(
     right_reader: asyncio.StreamReader,
     right_writer: asyncio.StreamWriter,
 ) -> None:
+    """Передавать байты одновременно в обоих направлениях до разрыва связи."""
     task1 = asyncio.create_task(_pipe(left_reader, right_writer))
     task2 = asyncio.create_task(_pipe(right_reader, left_writer))
 
-    done, pending = await asyncio.wait(
+    _, pending = await asyncio.wait(
         {task1, task2},
         return_when=asyncio.FIRST_COMPLETED,
     )
@@ -147,6 +162,7 @@ async def _bridge(
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Копировать TCP-байты в одном направлении блоками до 64 КиБ."""
     try:
         while True:
             data = await reader.read(64 * 1024)

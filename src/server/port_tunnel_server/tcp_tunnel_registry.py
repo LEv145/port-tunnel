@@ -1,15 +1,27 @@
+"""Состояние и реестр активных TCP-туннелей на сервере."""
+
 import asyncio
 from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
 class PendingTCPConnection:
+    """Внешнее соединение, ожидающее парного data-соединения клиента.
+
+    Оно появляется, когда пользователь подключается к публичному порту, но
+    клиентский агент ещё не успел открыть отдельное соединение для передачи
+    данных. После сопоставления по `connection_id` объект извлекается из
+    реестра и передаётся в TCP-мост.
+    """
+
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
 
 
 @dataclass(slots=True)
 class RegisteredTCPTunnel:
+    """Полное серверное состояние одного зарегистрированного туннеля."""
+
     tunnel_id: str
     public_host: str
     public_port: int
@@ -19,12 +31,25 @@ class RegisteredTCPTunnel:
 
 
 class TCPTunnelRegistry:
+    """Потокобезопасный для asyncio реестр активных TCP-туннелей.
+
+    Реестр решает две задачи:
+
+    * хранит зарегистрированные туннели по `tunnel_id`;
+    * временно хранит внешние подключения до прихода соответствующего
+      data-соединения от клиентского агента.
+
+    `asyncio.Lock` не защищает от нескольких процессов, но исключает
+    пересечение конкурентных корутин внутри одного event loop.
+    """
+
     def __init__(self) -> None:
         self._tunnels_by_id: dict[str, RegisteredTCPTunnel] = {}
         self._tunnel_ids_by_public_port: dict[int, str] = {}
         self._lock = asyncio.Lock()
 
     async def add(self, tunnel: RegisteredTCPTunnel) -> None:
+        """Добавить туннель и запретить повторное использование public port."""
         async with self._lock:
             if tunnel.public_port in self._tunnel_ids_by_public_port:
                 raise ValueError(f"public port already used: {tunnel.public_port}")
@@ -33,6 +58,7 @@ class TCPTunnelRegistry:
             self._tunnel_ids_by_public_port[tunnel.public_port] = tunnel.tunnel_id
 
     async def remove(self, tunnel_id: str) -> RegisteredTCPTunnel | None:
+        """Удалить туннель из всех индексов и вернуть его состояние."""
         async with self._lock:
             tunnel = self._tunnels_by_id.pop(tunnel_id, None)
             if tunnel is None:
@@ -42,6 +68,7 @@ class TCPTunnelRegistry:
             return tunnel
 
     async def get_by_id(self, tunnel_id: str) -> RegisteredTCPTunnel | None:
+        """Найти активный туннель по его внутреннему идентификатору."""
         async with self._lock:
             return self._tunnels_by_id.get(tunnel_id)
 
@@ -51,6 +78,7 @@ class TCPTunnelRegistry:
         connection_id: str,
         connection: PendingTCPConnection,
     ) -> bool:
+        """Сохранить внешнее соединение до прихода data-соединения клиента."""
         async with self._lock:
             tunnel = self._tunnels_by_id.get(tunnel_id)
             if tunnel is None:
@@ -64,6 +92,7 @@ class TCPTunnelRegistry:
         tunnel_id: str,
         connection_id: str,
     ) -> PendingTCPConnection | None:
+        """Извлечь внешнее соединение для создания двунаправленного моста."""
         async with self._lock:
             tunnel = self._tunnels_by_id.get(tunnel_id)
             if tunnel is None:
