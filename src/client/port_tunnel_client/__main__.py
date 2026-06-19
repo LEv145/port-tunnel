@@ -2,16 +2,13 @@ import asyncio
 import logging
 
 import typer
-import colorlog
-
 from transmitters import ABCTransmitter, TCPTransmitter
 
+from .setups.logging import setup_logging
 
-_handler = colorlog.StreamHandler()
-_handler.setFormatter(colorlog.ColoredFormatter("%(log_color)s%(levelname)s:%(name)s:%(message)s"))
-_log = colorlog.getLogger(__name__)
-_log.addHandler(_handler)
-_log.setLevel(logging.INFO)
+
+setup_logging(logging.INFO)
+_log = logging.getLogger(__name__)
 
 app = typer.Typer()
 
@@ -53,10 +50,28 @@ async def async_main(
     response = await transmitter.read_json(reader)
     _log.info(f"[client] registered: {response}")
 
+    if response.get("type") == "error":
+        raise RuntimeError(response.get("message"))
+
+    tunnel_id = response.get("tunnel_id")
+    if not isinstance(tunnel_id, str):
+        raise RuntimeError("Server did not return tunnel_id")
+
     while True:
         message = await transmitter.read_json(reader)
 
         if message.get("type") == "new_connection":
+            message_tunnel_id = message.get("tunnel_id")
+            connection_id = message.get("connection_id")
+
+            if message_tunnel_id != tunnel_id:
+                _log.info(f"[client] ignored connection for another tunnel: {message}")
+                continue
+
+            if not isinstance(connection_id, str):
+                _log.info(f"[client] invalid connection_id: {message}")
+                continue
+
             asyncio.create_task(
                 _handle_new_connection(
                     transmitter=transmitter,
@@ -64,7 +79,8 @@ async def async_main(
                     control_port=control_port,
                     local_host=local_host,
                     local_port=local_port,
-                    connection_id=message["connection_id"],
+                    tunnel_id=tunnel_id,
+                    connection_id=connection_id,
                 )
             )
         else:
@@ -77,6 +93,7 @@ async def _handle_new_connection(
     control_port: int,
     local_host: str,
     local_port: int,
+    tunnel_id: str,
     connection_id: str,
 ) -> None:
     _log.info(f"[client] new connection_id={connection_id}")
@@ -90,8 +107,9 @@ async def _handle_new_connection(
         server_writer,
         {
             "type": "data",
+            "tunnel_id": tunnel_id,
             "connection_id": connection_id,
-        }
+        },
     )
 
     try:
