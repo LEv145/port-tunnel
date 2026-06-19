@@ -22,8 +22,8 @@ class TCPTunnelServer:
 
     Сервер принимает на одном control-порту два вида соединений клиента:
 
-    * `register` — долговременное управляющее соединение туннеля;
-    * `data` — отдельное соединение для одного внешнего TCP-подключения.
+    * `register` - долговременное управляющее соединение туннеля;
+    * `data` - отдельное соединение для одного внешнего TCP-подключения.
 
     Для каждого зарегистрированного туннеля сервер динамически запускает
     отдельный публичный listener. Пользовательский трафик сервер не разбирает:
@@ -79,7 +79,7 @@ class TCPTunnelServer:
         message_type = message.get("type")
 
         if message_type == "register":
-            await self._handle_register(message, writer)
+            await self._handle_register(message, reader, writer)
             return
 
         if message_type == "data":
@@ -92,6 +92,7 @@ class TCPTunnelServer:
     async def _handle_register(
         self,
         message: dict[str, Any],
+        reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
         """Зарегистрировать туннель и запустить его публичный TCP-listener.
@@ -199,11 +200,15 @@ class TCPTunnelServer:
             public_task = asyncio.create_task(public_server.serve_forever())
 
             try:
-                # Управляющее соединение является индикатором жизни клиента.
-                # В текущем MVP нет heartbeat, поэтому корутина периодически
-                # проверяет только локальное состояние writer.
-                while not writer.is_closing():
-                    await asyncio.sleep(3600)
+                # После регистрации control-соединение используется сервером
+                # для отправки уведомлений клиенту. Здесь мы читаем его только
+                # для обнаружения EOF - момента, когда клиент отключился.
+                while await reader.read(1024):
+                    pass
+            except (ConnectionError, asyncio.IncompleteReadError):
+                # Разрыв сети и принудительное завершение клиента также означают,
+                # что туннель больше нельзя считать активным.
+                pass
             finally:
                 public_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -319,7 +324,14 @@ class TCPTunnelServer:
             _log.info(f"[control] close pending connection_id={connection_id}")
             await self._close_writer(connection.writer)
 
-        _log.info(f"[control] tunnel unregistered tunnel_id={tunnel_id}")
+        tunnel.pending_public_connections.clear()
+        await self._close_writer(tunnel.control_writer)
+
+        _log.info(
+            "[control] tunnel unregistered tunnel_id=%s public_port=%s",
+            tunnel.tunnel_id,
+            tunnel.public_port,
+        )
 
     async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
         """Идемпотентно инициировать закрытие TCP-потока и дождаться его."""
