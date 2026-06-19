@@ -1,5 +1,6 @@
 """CLI и клиентская часть обратного TCP-туннеля."""
 
+import os
 import asyncio
 import logging
 
