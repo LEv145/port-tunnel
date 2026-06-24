@@ -2,10 +2,10 @@ import asyncio
 import json
 from typing import Any
 
-from .abc import ABCTransmitter
+from .abc import ABCMessageCodec
 
 
-class TCPTransmitter(ABCTransmitter):
+class ControlMessageCodec(ABCMessageCodec):
     async def send_json(self, writer: asyncio.StreamWriter, message: dict[str, Any]) -> None:
         data = json.dumps(message, ensure_ascii=False).encode("utf-8")
         writer.write(len(data).to_bytes(4, "big") + data)

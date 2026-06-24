@@ -2,7 +2,7 @@ import abc
 import typing as tp
 
 
-class ABCTransmitter(abc.ABC):
+class ABCMessageCodec(abc.ABC):
     async def send_json(self, writer: tp.Any, message: dict[str, tp.Any]) -> None:
         pass
 

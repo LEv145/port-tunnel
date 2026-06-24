@@ -15,7 +15,7 @@ from port_tunnel_protocol import (
     RegisteredMessage,
     RegisterMessage,
 )
-from port_tunnel_common.transmitters import ABCTransmitter
+from port_tunnel_common.codecs import ABCMessageCodec
 from port_tunnel_common.mixins import ProtocolTransmitterMixin, BridgeMixin
 
 from .registry import PendingTCPConnection, RegisteredTCPTunnel, TCPTunnelRegistry, ABCTunnelRegistry
@@ -41,7 +41,7 @@ class TCPTunnelServer(ProtocolTransmitterMixin, BridgeMixin):
         self,
         *,
         config: TCPTunnelServerConfig,
-        transmitter: ABCTransmitter,
+        transmitter: ABCMessageCodec,
         authenticator: ABCClientAuthenticator,
     ) -> None:
         self._config = config

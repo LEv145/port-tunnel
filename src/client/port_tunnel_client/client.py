@@ -14,7 +14,7 @@ from port_tunnel_protocol import (
     RegisteredMessage,
     RegisterMessage,
 )
-from port_tunnel_common.transmitters import ABCTransmitter
+from port_tunnel_common.codecs import ABCMessageCodec
 from port_tunnel_common.mixins import ProtocolTransmitterMixin, BridgeMixin
 
 
@@ -47,7 +47,7 @@ class TCPTunnelClient(ProtocolTransmitterMixin, BridgeMixin):
         self,
         *,
         config: TCPTunnelClientConfig,
-        transmitter: ABCTransmitter,
+        transmitter: ABCMessageCodec,
     ) -> None:
         self._transmitter = transmitter
         self._config = config
