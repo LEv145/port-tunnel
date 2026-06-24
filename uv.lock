@@ -6,8 +6,9 @@ requires-python = ">=3.14"
 members = [
     "port-tunnel",
     "port-tunnel-client",
+    "port-tunnel-common",
+    "port-tunnel-protocol",
     "port-tunnel-server",
-    "transmitters",
 ]
 
 [[package]]
@@ -92,22 +93,50 @@ name = "port-tunnel-client"
 version = "0.1.0"
 source = { virtual = "src/client" }
 dependencies = [
-    { name = "transmitters" },
+    { name = "port-tunnel-common" },
+    { name = "port-tunnel-protocol" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "transmitters", editable = "src/transmitters" }]
+requires-dist = [
+    { name = "port-tunnel-common", editable = "src/common" },
+    { name = "port-tunnel-protocol", editable = "src/protocol" },
+]
+
+[[package]]
+name = "port-tunnel-common"
+version = "0.1.0"
+source = { editable = "src/common" }
+dependencies = [
+    { name = "port-tunnel-protocol" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "port-tunnel-protocol", editable = "src/protocol" },
+    { name = "pydantic", specifier = ">=2" },
+]
+
+[[package]]
+name = "port-tunnel-protocol"
+version = "0.1.0"
+source = { editable = "src/protocol" }
 
 [[package]]
 name = "port-tunnel-server"
 version = "0.1.0"
 source = { virtual = "src/server" }
 dependencies = [
-    { name = "transmitters" },
+    { name = "port-tunnel-common" },
+    { name = "port-tunnel-protocol" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "transmitters", editable = "src/transmitters" }]
+requires-dist = [
+    { name = "port-tunnel-common", editable = "src/common" },
+    { name = "port-tunnel-protocol", editable = "src/protocol" },
+]
 
 [[package]]
 name = "pydantic"
@@ -195,11 +224,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/58/15/8b3609fd3830ef7b2
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl", hash = "sha256:7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686", size = 9755, upload-time = "2023-10-24T04:13:38.866Z" },
 ]
-
-[[package]]
-name = "transmitters"
-version = "0.1.0"
-source = { editable = "src/transmitters" }
 
 [[package]]
 name = "typer"
