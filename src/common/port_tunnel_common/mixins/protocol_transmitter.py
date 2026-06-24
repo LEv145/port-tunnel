@@ -5,7 +5,7 @@ from port_tunnel_protocol.codec import ControlMessage, parse_control_message, se
 from port_tunnel_protocol.messages import ControlMessageBase
 
 
-class ProtocolTransmitterMixin:
+class ProtocolCodecMixin:
     _codec: ABCMessageCodec
 
     async def _read_control_message(

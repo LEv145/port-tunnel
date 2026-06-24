@@ -16,7 +16,7 @@ from port_tunnel_protocol import (
     RegisterMessage,
 )
 from port_tunnel_common.codecs import ABCMessageCodec
-from port_tunnel_common.mixins import ProtocolTransmitterMixin, BridgeMixin
+from port_tunnel_common.mixins import ProtocolCodecMixin, BridgeMixin
 
 from .registry import PendingTCPConnection, RegisteredTCPTunnel, TCPTunnelRegistry, ABCTunnelRegistry
 from .authentication import ABCClientAuthenticator
@@ -34,18 +34,18 @@ class TCPTunnelServerConfig:
     public_host: str
 
 
-class TCPTunnelServer(ProtocolTransmitterMixin, BridgeMixin):
+class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
     """Управляет control-соединениями, публичными портами и TCP-мостами."""
 
     def __init__(
         self,
         *,
         config: TCPTunnelServerConfig,
-        transmitter: ABCMessageCodec,
+        codec: ABCMessageCodec,
         authenticator: ABCClientAuthenticator,
     ) -> None:
         self._config = config
-        self._transmitter = transmitter
+        self._codec = codec
         self._authenticator = authenticator
         self._registry: ABCTunnelRegistry = TCPTunnelRegistry()
 

@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 import typer
-from port_tunnel_transmitters import TCPTransmitter
+from port_tunnel_common.codecs import ControlMessageCodec
 
 from .setups.logging import setup_logging
 from .server import TCPTunnelServer, TCPTunnelServerConfig
@@ -52,7 +52,7 @@ async def async_main(
     )
     server = TCPTunnelServer(
         config=config,
-        transmitter=TCPTransmitter(),
+        codec=ControlMessageCodec(),
         authenticator=StaticTokenAuthenticator(tokens=client_tokens),
     )
     await server.run()

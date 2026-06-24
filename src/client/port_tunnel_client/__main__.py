@@ -5,7 +5,7 @@ import logging
 import os
 
 import typer
-from port_tunnel_transmitters import TCPTransmitter
+from port_tunnel_common.codecs import ControlMessageCodec
 
 from .client import TCPTunnelClient, TCPTunnelClientConfig
 from .setups.logging import setup_logging
@@ -44,7 +44,7 @@ def main(
     )
 
     client = TCPTunnelClient(
-        transmitter=TCPTransmitter(),
+        codec=ControlMessageCodec(),
         config=config,
     )
 

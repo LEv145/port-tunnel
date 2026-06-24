@@ -15,7 +15,7 @@ from port_tunnel_protocol import (
     RegisterMessage,
 )
 from port_tunnel_common.codecs import ABCMessageCodec
-from port_tunnel_common.mixins import ProtocolTransmitterMixin, BridgeMixin
+from port_tunnel_common.mixins import ProtocolCodecMixin, BridgeMixin
 
 
 _log = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class TCPTunnelClientConfig:
     public_port: int
 
 
-class TCPTunnelClient(ProtocolTransmitterMixin, BridgeMixin):
+class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
     """Регистрирует TCP-туннель и обслуживает control-канал.
 
     Объект владеет управляющим соединением и фоновыми задачами
@@ -47,9 +47,9 @@ class TCPTunnelClient(ProtocolTransmitterMixin, BridgeMixin):
         self,
         *,
         config: TCPTunnelClientConfig,
-        transmitter: ABCMessageCodec,
+        codec: ABCMessageCodec,
     ) -> None:
-        self._transmitter = transmitter
+        self._codec = codec
         self._config = config
 
         self._control_reader: asyncio.StreamReader | None = None
