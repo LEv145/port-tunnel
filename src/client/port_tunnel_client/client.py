@@ -119,7 +119,7 @@ class TCPTunnelClient(ProtocolTransmitterMixin, BridgeMixin):
             ),
         )
 
-        response = await self._transmitter.read_json(reader)
+        response = await self._read_control_message(reader)
         match response:
             case RegisteredMessage(
                 tunnel_id=tunnel_id,

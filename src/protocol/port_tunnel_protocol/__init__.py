@@ -16,4 +16,3 @@ from .messages import (
     RegisteredMessage,
     RegisterMessage,
 )
-from .mixin import ProtocolTransmitterMixin
