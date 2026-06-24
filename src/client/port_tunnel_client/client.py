@@ -4,9 +4,18 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
-from typing import Any
 
-from transmitters import ABCTransmitter
+from port_tunnel_protocol import (
+    ControlMessage,
+    DataMessage,
+    ErrorMessage,
+    InvalidControlMessageError,
+    NewConnectionMessage,
+    RegisteredMessage,
+    RegisterMessage,
+)
+from port_tunnel_common.transmitters import ABCTransmitter
+from port_tunnel_common.mixins import ProtocolTransmitterMixin, BridgeMixin
 
 
 _log = logging.getLogger(__name__)
@@ -25,7 +34,7 @@ class TCPTunnelClientConfig:
     public_port: int
 
 
-class TCPTunnelClient:
+class TCPTunnelClient(ProtocolTransmitterMixin, BridgeMixin):
     """Регистрирует TCP-туннель и обслуживает control-канал.
 
     Объект владеет управляющим соединением и фоновыми задачами
@@ -37,8 +46,8 @@ class TCPTunnelClient:
     def __init__(
         self,
         *,
-        transmitter: ABCTransmitter,
         config: TCPTunnelClientConfig,
+        transmitter: ABCTransmitter,
     ) -> None:
         self._transmitter = transmitter
         self._config = config
@@ -59,6 +68,8 @@ class TCPTunnelClient:
             await self._run_control_loop()
         except asyncio.IncompleteReadError:
             _log.warning("[client] control connection closed by server")
+        except InvalidControlMessageError as error:
+            _log.warning("[client] invalid control message error_count=%s", error.error_count)
         except ConnectionError as error:
             _log.warning("[client] control connection lost: %s", error)
         finally:
@@ -98,89 +109,98 @@ class TCPTunnelClient:
         """Авторизоваться и получить идентификаторы туннеля."""
         reader, writer = self._require_control_connection()
 
-        await self._transmitter.send_json(
+        await self._send_control_message(
             writer,
-            {
-                "type": "register",
-                "client_id": self._config.client_id,
-                "token": self._config.token,
-                "local_port": self._config.local_port,
-                "public_port": self._config.public_port,
-            },
+            RegisterMessage(
+                client_id=self._config.client_id,
+                token=self._config.token,
+                local_port=self._config.local_port,
+                public_port=self._config.public_port,
+            ),
         )
 
         response = await self._transmitter.read_json(reader)
+        match response:
+            case RegisteredMessage(
+                tunnel_id=tunnel_id,
+                data_token=data_token,
+                public_port=public_port,
+            ):
+                if public_port != self._config.public_port:
+                    raise RuntimeError(
+                        "Server returned an unexpected public port: "
+                        f"expected={self._config.public_port}, "
+                        f"received={public_port}"
+                    )
 
-        if response.get("type") == "error":
-            message = response.get("message", "registration failed")
-            raise RuntimeError(str(message))
+                self._tunnel_id = tunnel_id
+                self._data_token = data_token
 
-        tunnel_id = response.get("tunnel_id")
-        data_token = response.get("data_token")
+                _log.info( "[client] registered tunnel_id=%s public_port=%s", tunnel_id, public_port)
 
-        if not isinstance(tunnel_id, str):
-            raise RuntimeError("Server did not return tunnel_id")
+            case ErrorMessage(
+                code=error_code,
+                message=error_message,
+            ):
+                raise RuntimeError(
+                    "Tunnel registration failed: "
+                    f"code={error_code!r}, "
+                    f"message={error_message}"
+                )
 
-        if not isinstance(data_token, str):
-            raise RuntimeError("Server did not return data_token")
-
-        self._tunnel_id = tunnel_id
-        self._data_token = data_token
-
-        _log.info(
-            "[client] registered tunnel_id=%s public_port=%s",
-            tunnel_id,
-            self._config.public_port,
-        )
+            case _:
+                raise RuntimeError(
+                    "Unexpected registration response: "
+                    f"{type(response).__name__}"
+                )
 
     async def _run_control_loop(self) -> None:
         """Последовательно читать и обрабатывать сообщения control-канала."""
         reader, _ = self._require_control_connection()
 
         while True:
-            message = await self._transmitter.read_json(reader)
+            message = await self._read_control_message(reader)
             await self._handle_control_message(message)
-
 
     async def _handle_control_message(
         self,
-        message: dict[str, Any],
+        message: ControlMessage,
     ) -> None:
-        """Передать управляющее сообщение нужному обработчику."""
-        message_type = message.get("type")
+        """Передать типизированное сообщение соответствующему обработчику."""
+        match message:
+            case NewConnectionMessage():
+                self._handle_new_connection_message(message)
 
-        if message_type == "new_connection":
-            self._handle_new_connection_message(message)
-            return
+            case ErrorMessage(
+                code=error_code,
+                message=error_message,
+            ):
+                _log.warning("[client] server error code=%r message=%s", error_code, error_message,)
 
-        _log.info(
-            "[client] unknown control message type=%r",
-            message_type,
-        )
+            case _:
+                _log.warning(
+                    "[client] unexpected control message type=%s",
+                    type(message).__name__,
+                )
 
     def _handle_new_connection_message(
         self,
-        message: dict[str, Any],
+        message: NewConnectionMessage,
     ) -> None:
         """Проверить команду и запустить задачу data-канала."""
-        tunnel_id = self._require_tunnel_id()
+        expected_tunnel_id = self._require_tunnel_id()
 
-        message_tunnel_id = message.get("tunnel_id")
-        connection_id = message.get("connection_id")
-
-        if message_tunnel_id != tunnel_id:
+        if message.tunnel_id != expected_tunnel_id:
             _log.warning(
-                "[client] ignored message for another tunnel",
+                "[client] ignored connection for another tunnel expected=%s received=%s",
+                expected_tunnel_id,
+                message.tunnel_id,
             )
             return
 
-        if not isinstance(connection_id, str):
-            _log.warning("[client] invalid connection_id")
-            return
-
         task = asyncio.create_task(
-            self._serve_connection(connection_id),
-            name=f"data-connection-{connection_id}",
+            self._serve_connection(message.connection_id),
+            name=f"data-connection-{message.connection_id}",
         )
 
         self._connection_tasks.add(task)
@@ -223,14 +243,13 @@ class TCPTunnelClient:
                 self._config.control_port,
             )
 
-            await self._transmitter.send_json(
+            await self._send_control_message(
                 server_writer,
-                {
-                    "type": "data",
-                    "tunnel_id": self._require_tunnel_id(),
-                    "connection_id": connection_id,
-                    "data_token": self._require_data_token(),
-                },
+                DataMessage(
+                    tunnel_id=self._require_tunnel_id(),
+                    connection_id=connection_id,
+                    data_token=self._require_data_token(),
+                ),
             )
 
             local_reader, local_writer = await asyncio.open_connection(
@@ -238,10 +257,7 @@ class TCPTunnelClient:
                 self._config.local_port,
             )
 
-            _log.info(
-                "[client] data bridge started connection_id=%s",
-                connection_id,
-            )
+            _log.info("[client] data bridge started connection_id=%s", connection_id)
 
             await self._bridge(
                 server_reader,
@@ -251,66 +267,13 @@ class TCPTunnelClient:
             )
 
         except (ConnectionError, OSError) as error:
-            _log.warning(
-                "[client] cannot serve connection_id=%s: %s",
-                connection_id,
-                error,
-            )
+            _log.warning("[client] cannot serve connection_id=%s: %s", connection_id, error)
         finally:
             if server_writer is not None:
                 await self._close_writer(server_writer)
 
             if local_writer is not None:
                 await self._close_writer(local_writer)
-
-    async def _bridge(
-        self,
-        left_reader: asyncio.StreamReader,
-        left_writer: asyncio.StreamWriter,
-        right_reader: asyncio.StreamReader,
-        right_writer: asyncio.StreamWriter,
-    ) -> None:
-        """Передавать TCP-байты одновременно в обоих направлениях."""
-        tasks = {
-            asyncio.create_task(
-                self._pipe(left_reader, right_writer),
-            ),
-            asyncio.create_task(
-                self._pipe(right_reader, left_writer),
-            ),
-        }
-
-        try:
-            await asyncio.wait(
-                tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        finally:
-            for task in tasks:
-                task.cancel()
-
-            await asyncio.gather(
-                *tasks,
-                return_exceptions=True,
-            )
-
-    async def _pipe(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Копировать TCP-байты в одном направлении."""
-        try:
-            while True:
-                data = await reader.read(64 * 1024)
-
-                if not data:
-                    return
-
-                writer.write(data)
-                await writer.drain()
-        except ConnectionError:
-            return
 
     def _require_control_connection(
         self,
@@ -321,14 +284,12 @@ class TCPTunnelClient:
 
         return self._control_reader, self._control_writer
 
-
     def _require_tunnel_id(self) -> str:
         """Вернуть идентификатор зарегистрированного туннеля."""
         if self._tunnel_id is None:
             raise RuntimeError("Tunnel is not registered")
 
         return self._tunnel_id
-
 
     def _require_data_token(self) -> str:
         """Вернуть временный токен data-соединений."""
@@ -337,7 +298,6 @@ class TCPTunnelClient:
 
         return self._data_token
 
-
     async def _close_writer(
         self,
         writer: asyncio.StreamWriter,
@@ -345,8 +305,5 @@ class TCPTunnelClient:
         """Закрыть TCP-поток и дождаться освобождения транспорта."""
         writer.close()
 
-        with contextlib.suppress(
-            ConnectionError,
-            RuntimeError,
-        ):
+        with contextlib.suppress(ConnectionError, RuntimeError):
             await writer.wait_closed()

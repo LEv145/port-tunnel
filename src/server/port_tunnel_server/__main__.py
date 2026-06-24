@@ -7,10 +7,10 @@ import json
 from typing import Any
 
 import typer
-from transmitters import TCPTransmitter
+from port_tunnel_transmitters import TCPTransmitter
 
 from .setups.logging import setup_logging
-from .server import TCPTunnelServer
+from .server import TCPTunnelServer, TCPTunnelServerConfig
 from .authentication import StaticTokenAuthenticator
 
 
@@ -45,11 +45,14 @@ async def async_main(
     client_tokens: dict[str, str],
 ) -> None:
     """Собрать зависимости сервера и передать управление event loop."""
-    server = TCPTunnelServer(
-        transmitter=TCPTransmitter(),
+    config = TCPTunnelServerConfig(
         control_host=control_host,
         control_port=control_port,
         public_host=public_host,
+    )
+    server = TCPTunnelServer(
+        config=config,
+        transmitter=TCPTransmitter(),
         authenticator=StaticTokenAuthenticator(tokens=client_tokens),
     )
     await server.run()

@@ -2,8 +2,10 @@
 name = "port-tunnel-client"
 version = "0.1.0"
 dependencies = [
-    "transmitters",
+    "port-tunnel-protocol",
+    "port-tunnel-common",
 ]
 
 [tool.uv.sources]
-transmitters = { workspace = true }
+port-tunnel-protocol = { workspace = true }
+port-tunnel-common = { workspace = true }

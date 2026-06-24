@@ -1,11 +1,9 @@
 [project]
-name = "port-tunnel-server"
+name = "port-tunnel-common"
 version = "0.1.0"
 dependencies = [
     "port-tunnel-protocol",
-    "port-tunnel-common",
 ]
 
 [tool.uv.sources]
 port-tunnel-protocol = { workspace = true }
-port-tunnel-common = { workspace = true }

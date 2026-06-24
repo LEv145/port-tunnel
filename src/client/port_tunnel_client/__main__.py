@@ -5,7 +5,7 @@ import logging
 import os
 
 import typer
-from transmitters import TCPTransmitter
+from port_tunnel_transmitters import TCPTransmitter
 
 from .client import TCPTunnelClient, TCPTunnelClientConfig
 from .setups.logging import setup_logging

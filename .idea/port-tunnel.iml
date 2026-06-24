@@ -5,7 +5,8 @@
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/client" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/server" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/src/transmitters" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/common" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/protocol" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
     <orderEntry type="jdk" jdkName="uv (port-tunnel)" jdkType="Python SDK" />
