@@ -16,7 +16,6 @@ class ProtocolTransmitterMixin:
         payload = await self._codec.read_json(reader)
         return parse_control_message(payload)
 
-
     async def _send_control_message(
         self,
         writer: asyncio.StreamWriter,
