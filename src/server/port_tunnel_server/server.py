@@ -15,6 +15,8 @@ from port_tunnel_protocol import (
     DataMessage,
     ErrorMessage,
     NewConnectionMessage,
+    PingMessage,
+    PongMessage,
     RegisteredMessage,
     RegisterMessage,
 )
@@ -33,6 +35,33 @@ class TCPTunnelServerConfig:
     control_host: str
     control_port: int
     public_host: str
+    heartbeat_interval: float = 15.0
+    heartbeat_timeout: float = 45.0
+
+    def __post_init__(self) -> None:
+        if self.heartbeat_interval <= 0:
+            raise ValueError("heartbeat_interval must be positive")
+
+        if self.heartbeat_timeout <= self.heartbeat_interval:
+            raise ValueError("heartbeat_timeout must be greater than heartbeat_interval")
+
+
+@dataclass(slots=True)
+class _HeartbeatState:
+    expected_id: str | None = None
+    response_event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def begin(self, heartbeat_id: str) -> None:
+        self.expected_id = heartbeat_id
+        self.response_event.clear()
+
+    def accept(self, heartbeat_id: str) -> bool:
+        if heartbeat_id != self.expected_id:
+            return False
+
+        self.expected_id = None
+        self.response_event.set()
+        return True
 
 
 class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
@@ -148,6 +177,8 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
                 public_port,
             )
 
+            heartbeat = _HeartbeatState()
+
             async with public_server:
                 public_task = asyncio.create_task(
                     public_server.serve_forever(),
@@ -155,10 +186,7 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
                 )
 
                 try:
-                    await self._run_registered_control_loop(
-                        tunnel_id=tunnel_id,
-                        channel=channel,
-                    )
+                    await self._run_registered_session(tunnel_id=tunnel_id, channel=channel, heartbeat=heartbeat)
                 except (
                     asyncio.IncompleteReadError,
                     ConnectionError,
@@ -179,6 +207,96 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
                     await public_task
 
             await self._unregister_tunnel(tunnel_id)
+
+    async def _run_registered_session(
+        self,
+        *,
+        tunnel_id: str,
+        channel: ControlChannel,
+        heartbeat: _HeartbeatState,
+    ) -> None:
+        """Одновременно обслуживать control-loop и серверный heartbeat."""
+        tasks = {
+            asyncio.create_task(
+                self._run_registered_control_loop(tunnel_id=tunnel_id, channel=channel, heartbeat=heartbeat),
+                name=f"control-loop-{tunnel_id}",
+            ),
+            asyncio.create_task(
+                self._run_heartbeat_loop(tunnel_id=tunnel_id, channel=channel, heartbeat=heartbeat),
+                name=f"heartbeat-{tunnel_id}",
+            ),
+        }
+
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            for task in done:
+                task.result()
+        finally:
+            for task in tasks:
+                task.cancel()
+
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_registered_control_loop(
+        self,
+        *,
+        tunnel_id: str,
+        channel: ControlChannel,
+        heartbeat: _HeartbeatState,
+    ) -> None:
+        """Последовательно читать сообщения зарегистрированного клиента."""
+        while True:
+            message = await channel.receive()
+
+            match message:
+                case PongMessage(heartbeat_id=heartbeat_id):
+                    if heartbeat.accept(heartbeat_id):
+                        _log.info("[heartbeat] pong received tunnel_id=%s heartbeat_id=%s", tunnel_id, heartbeat_id)
+                    else:
+                        _log.warning(
+                            "[heartbeat] unexpected pong tunnel_id=%s heartbeat_id=%s",
+                            tunnel_id,
+                            heartbeat_id,
+                        )
+
+                case _:
+                    _log.warning(
+                        "[control] unexpected message tunnel_id=%s type=%s",
+                        tunnel_id,
+                        type(message).__name__,
+                    )
+
+    async def _run_heartbeat_loop(
+        self,
+        *,
+        tunnel_id: str,
+        channel: ControlChannel,
+        heartbeat: _HeartbeatState,
+    ) -> None:
+        """Периодически проверять доступность клиента через ping/pong."""
+        while True:
+            await asyncio.sleep(self._config.heartbeat_interval)
+            heartbeat_id = secrets.token_hex(8)
+            heartbeat.begin(heartbeat_id)
+
+            try:
+                async with asyncio.timeout(self._config.heartbeat_timeout):
+                    await channel.send(PingMessage(heartbeat_id=heartbeat_id))
+                    _log.info("[heartbeat] ping sent tunnel_id=%s heartbeat_id=%s", tunnel_id, heartbeat_id)
+                    await heartbeat.response_event.wait()
+            except TimeoutError:
+                _log.warning(
+                    "[heartbeat] timeout tunnel_id=%s heartbeat_id=%s timeout=%.1fs",
+                    tunnel_id,
+                    heartbeat_id,
+                    self._config.heartbeat_timeout,
+                )
+                await channel.close()
+                return
+            except (ConnectionError, OSError, ControlChannelStateError):
+                await channel.close()
+                return
 
     async def _handle_public_connection(
         self,
@@ -235,10 +353,7 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
             await self._close_writer(writer)
             return
 
-        public_connection = await self._registry.pop_pending_public_connection(
-            tunnel_id,
-            connection_id,
-        )
+        public_connection = await self._registry.activate_data_connection(tunnel_id, connection_id, writer)
         if public_connection is None:
             _log.info("[data] unknown tunnel_id=%s connection_id=%s", tunnel_id, connection_id)
             await self._close_writer(writer)
@@ -249,6 +364,7 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
         try:
             await self._bridge(public_connection.reader, public_connection.writer, reader, writer)
         finally:
+            await self._registry.remove_active_data_connection(tunnel_id, connection_id)
             await self._close_writer(public_connection.writer)
             await self._close_writer(writer)
 
@@ -262,13 +378,21 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
 
         tunnel.public_server.close()
         await tunnel.public_server.wait_closed()
+        await tunnel.control_channel.close()
 
         for connection_id, connection in list(tunnel.pending_public_connections.items()):
             _log.info("[control] close pending connection_id=%s", connection_id)
             await self._close_writer(connection.writer)
 
+        for connection_id, connection in list(tunnel.active_data_connections.items()):
+            _log.info("[control] close active connection_id=%s", connection_id)
+            await asyncio.gather(
+                self._close_writer(connection.public_writer),
+                self._close_writer(connection.data_writer),
+            )
+
         tunnel.pending_public_connections.clear()
-        await tunnel.control_channel.close()
+        tunnel.active_data_connections.clear()
 
         _log.info(
             "[control] tunnel unregistered tunnel_id=%s public_port=%s",
@@ -276,30 +400,7 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
             tunnel.public_port,
         )
 
-    async def _run_registered_control_loop(
-        self,
-        *,
-        tunnel_id: str,
-        channel: ControlChannel,
-    ) -> None:
-        """Последовательно читать сообщения зарегистрированного клиента."""
-        while True:
-            message = await channel.receive()
-
-            _log.warning(
-                "[control] unexpected message "
-                "tunnel_id=%s type=%s",
-                tunnel_id,
-                type(message).__name__,
-            )
-
-    async def _send_error_and_close(
-        self,
-        channel: ControlChannel,
-        *,
-        code: str,
-        message: str,
-    ) -> None:
+    async def _send_error_and_close(self, channel: ControlChannel, *, code: str, message: str) -> None:
         """Отправить ошибку и гарантированно закрыть канал."""
         try:
             await channel.send(ErrorMessage(code=code, message=message))

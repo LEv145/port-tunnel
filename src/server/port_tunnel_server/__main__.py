@@ -15,7 +15,6 @@ from .server import TCPTunnelServer, TCPTunnelServerConfig
 
 
 setup_logging(logging.INFO)
-_log = logging.getLogger(__name__)
 
 app = typer.Typer()
 
@@ -25,6 +24,8 @@ def main(
     control_host: str = "0.0.0.0",
     control_port: int = 7000,
     public_host: str = "0.0.0.0",
+    heartbeat_interval: float = 15.0,
+    heartbeat_timeout: float = 45.0,
 ) -> None:
     """Запустить сервер управления TCP-туннелями."""
     client_tokens = _load_client_tokens()
@@ -33,6 +34,8 @@ def main(
             control_host=control_host,
             control_port=control_port,
             public_host=public_host,
+            heartbeat_interval=heartbeat_interval,
+            heartbeat_timeout=heartbeat_timeout,
             client_tokens=client_tokens,
         ),
     )
@@ -42,6 +45,8 @@ async def async_main(
     control_host: str,
     control_port: int,
     public_host: str,
+    heartbeat_interval: float,
+    heartbeat_timeout: float,
     client_tokens: dict[str, str],
 ) -> None:
     """Собрать зависимости сервера и передать управление event loop."""
@@ -49,6 +54,8 @@ async def async_main(
         control_host=control_host,
         control_port=control_port,
         public_host=public_host,
+        heartbeat_interval=heartbeat_interval,
+        heartbeat_timeout=heartbeat_timeout,
     )
     server = TCPTunnelServer(
         config=config,

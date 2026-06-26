@@ -13,6 +13,8 @@ from port_tunnel_protocol import (
     ErrorMessage,
     InvalidControlMessageError,
     NewConnectionMessage,
+    PingMessage,
+    PongMessage,
     RegisteredMessage,
     RegisterMessage,
 )
@@ -135,19 +137,21 @@ class TCPTunnelClient(BridgeMixin, StreamUtilsMixin):
             case NewConnectionMessage():
                 self._handle_new_connection_message(message)
 
-            case ErrorMessage(
-                code=error_code,
-                message=error_message,
-            ):
+            case PingMessage(heartbeat_id=heartbeat_id):
+                await self._handle_ping_message(heartbeat_id)
+
+            case ErrorMessage(code=error_code, message=error_message):
                 _log.warning("[client] server error code=%r message=%s", error_code, error_message)
 
             case _:
                 _log.warning("[client] unexpected control message type=%s", type(message).__name__)
 
-    def _handle_new_connection_message(
-        self,
-        message: NewConnectionMessage,
-    ) -> None:
+    async def _handle_ping_message(self, heartbeat_id: str) -> None:
+        """Ответить серверу на heartbeat-запрос."""
+        await self._require_control_channel().send(PongMessage(heartbeat_id=heartbeat_id))
+        _log.info("[heartbeat] pong sent heartbeat_id=%s", heartbeat_id)
+
+    def _handle_new_connection_message(self, message: NewConnectionMessage) -> None:
         """Проверить команду и запустить задачу data-канала."""
         expected_tunnel_id = self._require_tunnel_id()
 

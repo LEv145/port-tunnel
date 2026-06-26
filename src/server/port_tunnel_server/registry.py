@@ -39,6 +39,23 @@ class ABCTunnelRegistry(abc.ABC):
     ) -> PendingTCPConnection | None:
         """Извлечь внешнее соединение."""
 
+    @abc.abstractmethod
+    async def activate_data_connection(
+        self,
+        tunnel_id: str,
+        connection_id: str,
+        data_writer: asyncio.StreamWriter,
+    ) -> PendingTCPConnection | None:
+        """Перевести ожидающее подключение в активное состояние."""
+
+    @abc.abstractmethod
+    async def remove_active_data_connection(
+        self,
+        tunnel_id: str,
+        connection_id: str,
+    ) -> ActiveTCPConnection | None:
+        """Удалить активное data-соединение из состояния туннеля."""
+
 
 @dataclass(slots=True)
 class PendingTCPConnection:
@@ -46,6 +63,14 @@ class PendingTCPConnection:
 
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
+
+
+@dataclass(slots=True)
+class ActiveTCPConnection:
+    """Пара writer активного серверного TCP-моста."""
+
+    public_writer: asyncio.StreamWriter
+    data_writer: asyncio.StreamWriter
 
 
 @dataclass(slots=True)
@@ -60,6 +85,7 @@ class RegisteredTCPTunnel:
     control_channel: ControlChannel
     public_server: asyncio.Server
     pending_public_connections: dict[str, PendingTCPConnection] = field(default_factory=dict)
+    active_data_connections: dict[str, ActiveTCPConnection] = field(default_factory=dict)
 
 
 class TCPTunnelRegistry(ABCTunnelRegistry):
@@ -121,3 +147,38 @@ class TCPTunnelRegistry(ABCTunnelRegistry):
                 return None
 
             return tunnel.pending_public_connections.pop(connection_id, None)
+
+    async def activate_data_connection(
+        self,
+        tunnel_id: str,
+        connection_id: str,
+        data_writer: asyncio.StreamWriter,
+    ) -> PendingTCPConnection | None:
+        """Атомарно извлечь pending-соединение и зарегистрировать активный мост."""
+        async with self._lock:
+            tunnel = self._tunnels_by_id.get(tunnel_id)
+            if tunnel is None:
+                return None
+
+            public_connection = tunnel.pending_public_connections.pop(connection_id, None)
+            if public_connection is None:
+                return None
+
+            tunnel.active_data_connections[connection_id] = ActiveTCPConnection(
+                public_writer=public_connection.writer,
+                data_writer=data_writer,
+            )
+            return public_connection
+
+    async def remove_active_data_connection(
+        self,
+        tunnel_id: str,
+        connection_id: str,
+    ) -> ActiveTCPConnection | None:
+        """Удалить активное data-соединение из состояния туннеля."""
+        async with self._lock:
+            tunnel = self._tunnels_by_id.get(tunnel_id)
+            if tunnel is None:
+                return None
+
+            return tunnel.active_data_connections.pop(connection_id, None)
