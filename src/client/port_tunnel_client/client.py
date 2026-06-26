@@ -52,9 +52,6 @@ class TCPTunnelClient(BridgeMixin, StreamUtilsMixin):
         self._control_channel: ControlChannel | None = None
         self._config = config
 
-        self._control_reader: asyncio.StreamReader | None = None
-        self._control_writer: asyncio.StreamWriter | None = None
-
         self._tunnel_id: str | None = None
         self._data_token: str | None = None
 
@@ -166,7 +163,7 @@ class TCPTunnelClient(BridgeMixin, StreamUtilsMixin):
                 code=error_code,
                 message=error_message,
             ):
-                _log.warning("[client] server error code=%r message=%s", error_code, error_message,)
+                _log.warning("[client] server error code=%r message=%s", error_code, error_message)
 
             case _:
                 _log.warning(

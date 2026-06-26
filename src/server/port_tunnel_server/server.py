@@ -18,7 +18,7 @@ from port_tunnel_protocol import (
 )
 from port_tunnel_common.codecs import ABCMessageCodec
 from port_tunnel_common.mixins import BridgeMixin, StreamUtilsMixin
-from port_tunnel_common.channels import ControlChannel
+from port_tunnel_common.channels import ControlChannel, ControlChannelStateError
 
 from .registry import PendingTCPConnection, RegisteredTCPTunnel, TCPTunnelRegistry, ABCTunnelRegistry
 from .authentication import ABCClientAuthenticator
@@ -29,7 +29,7 @@ _log = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class TCPTunnelServerConfig:
-    """Неизменяемые параметры одного TCP-туннеля."""
+    """Неизменяемые параметры TCP-сервера туннелирования."""
 
     control_host: str
     control_port: int
@@ -77,7 +77,13 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
 
         try:
             message = await channel.receive()
-        except Exception as error:
+        except (
+            asyncio.IncompleteReadError,
+            ConnectionError,
+            OSError,
+            UnicodeDecodeError,
+            ValueError,
+        ) as error:
             _log.warning("[control] invalid initial message error_type=%s", type(error).__name__)
             await channel.close()
             return
@@ -112,13 +118,11 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
         if not self._authenticator.authenticate(client_id, token):
             _log.info("[auth] registration rejected client_id=%s", client_id)
 
-            await channel.send(
-                ErrorMessage(
-                    code="unauthorized",
-                    message="invalid client credentials",
-                ),
+            await self._send_error_and_close(
+                channel=channel,
+                code="unauthorized",
+                message="invalid client credentials",
             )
-            await channel.close()
             return
 
         tunnel_id = secrets.token_hex(8)
@@ -130,16 +134,11 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
                 public_port,
             )
         except OSError as error:
-            await channel.send(
-                ErrorMessage(
-                    code="public_port_unavailable",
-                    message=(
-                        f"cannot listen public port "
-                        f"{public_port}: {error}"
-                    ),
-                ),
+            await self._send_error_and_close(
+                channel=channel,
+                code="public_port_unavailable",
+                message=f"cannot listen public port {public_port}: {error}",
             )
-            await channel.close()
             return
 
         data_token = secrets.token_urlsafe(32)
@@ -159,13 +158,11 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
             public_server.close()
             await public_server.wait_closed()
 
-            await channel.send(
-                ErrorMessage(
-                    code="public_port_already_registered",
-                    message=str(error),
-                ),
+            await self._send_error_and_close(
+                channel=channel,
+                code="public_port_already_registered",
+                message=str(error),
             )
-            await channel.close()
             return
 
         public_task: asyncio.Task[None] | None = None
@@ -250,7 +247,7 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
                     connection_id=connection_id,
                 ),
             )
-        except (ConnectionError, OSError) as error:
+        except (ConnectionError, OSError, ControlChannelStateError) as error:
             _log.info(f"[public] cannot notify client: {error}")
             await self._registry.pop_pending_public_connection(tunnel_id, connection_id)
             await self._close_writer(writer)
@@ -339,3 +336,16 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
                 tunnel_id,
                 type(message).__name__,
             )
+
+    async def _send_error_and_close(
+        self,
+        channel: ControlChannel,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        """Отправить ошибку и гарантированно закрыть канал."""
+        try:
+            await channel.send(ErrorMessage(code=code, message=message))
+        finally:
+            await channel.close()

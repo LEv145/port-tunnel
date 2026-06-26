@@ -70,7 +70,7 @@ class ControlChannel:
         finally:
             self._read_in_progress = False
 
-    def detach(self) -> tuple[asyncio.StreamReader,  asyncio.StreamWriter]:
+    def detach(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Передать потоки вызывающему коду для raw TCP-обмена.
 
         После вызова канал больше нельзя использовать для `send`,
@@ -99,10 +99,12 @@ class ControlChannel:
                 raise ControlChannelStateError("Detached channel no longer owns its streams")
 
             self._closed = True
-            self._writer.close()
 
-            with contextlib.suppress(ConnectionError, RuntimeError):
-                await self._writer.wait_closed()
+            async with self._write_lock:
+                self._writer.close()
+
+                with contextlib.suppress(ConnectionError, RuntimeError):
+                    await self._writer.wait_closed()
 
     @property
     def is_closing(self) -> bool:

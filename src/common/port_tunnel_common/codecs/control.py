@@ -7,6 +7,12 @@ from .abc import ABCMessageCodec
 
 class ControlMessageCodec(ABCMessageCodec):
     """Кодирует JSON-объекты в TCP-поток и декодирует их обратно."""
+    def __init__(
+        self,
+        *,
+        max_message_size: int = 64 * 1024,
+    ) -> None:
+        self._max_message_size = max_message_size
 
     async def send_json(self, writer: asyncio.StreamWriter, message: dict[str, object]) -> None:
         """Отправить один JSON-объект с префиксом длины."""
@@ -18,6 +24,10 @@ class ControlMessageCodec(ABCMessageCodec):
         """Прочитать один JSON-объект с префиксом длины."""
         size_raw = await reader.readexactly(4)
         size = int.from_bytes(size_raw, "big")
+
+        if size > self._max_message_size:
+            raise ValueError(f"Control message is too large: {size} bytes")
+
         data = await reader.readexactly(size)
         payload = json.loads(data.decode("utf-8"))
 
