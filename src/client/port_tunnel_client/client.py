@@ -1,7 +1,6 @@
 """Клиентская часть обратного TCP-туннеля."""
 
 import asyncio
-import contextlib
 import logging
 from dataclasses import dataclass
 
@@ -15,7 +14,8 @@ from port_tunnel_protocol import (
     RegisterMessage,
 )
 from port_tunnel_common.codecs import ABCMessageCodec
-from port_tunnel_common.mixins import ProtocolCodecMixin, BridgeMixin
+from port_tunnel_common.mixins import BridgeMixin, StreamUtilsMixin
+from port_tunnel_common.channels import ControlChannel
 
 
 _log = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class TCPTunnelClientConfig:
     public_port: int
 
 
-class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
+class TCPTunnelClient(BridgeMixin, StreamUtilsMixin):
     """Регистрирует TCP-туннель и обслуживает control-канал.
 
     Объект владеет управляющим соединением и фоновыми задачами
@@ -42,7 +42,6 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
 
     Только `_run_control_loop` читает из control StreamReader.
     """
-
     def __init__(
         self,
         *,
@@ -50,6 +49,7 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
         codec: ABCMessageCodec,
     ) -> None:
         self._codec = codec
+        self._control_channel: ControlChannel | None = None
         self._config = config
 
         self._control_reader: asyncio.StreamReader | None = None
@@ -78,7 +78,6 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
     async def close(self) -> None:
         """Остановить data-задачи и закрыть управляющее соединение."""
         tasks = tuple(self._connection_tasks)
-
         for task in tasks:
             task.cancel()
 
@@ -87,30 +86,27 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
 
         self._connection_tasks.clear()
 
-        if self._control_writer is not None:
-            await self._close_writer(self._control_writer)
+        channel = self._control_channel
+        self._control_channel = None
 
-        self._control_reader = None
-        self._control_writer = None
+        if channel is not None:
+            await channel.close()
+
         self._tunnel_id = None
         self._data_token = None
 
     async def _open_control_connection(self) -> None:
         """Открыть постоянное управляющее соединение с сервером."""
-        reader, writer = await asyncio.open_connection(
-            self._config.server_host,
-            self._config.control_port,
+        self._control_channel = await ControlChannel.connect(
+            host=self._config.server_host,
+            port=self._config.control_port,
+            codec=self._codec,
         )
-
-        self._control_reader = reader
-        self._control_writer = writer
 
     async def _register_tunnel(self) -> None:
         """Авторизоваться и получить идентификаторы туннеля."""
-        reader, writer = self._require_control_connection()
-
-        await self._send_control_message(
-            writer,
+        channel = self._require_control_channel()
+        await channel.send(
             RegisterMessage(
                 client_id=self._config.client_id,
                 token=self._config.token,
@@ -119,7 +115,7 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
             ),
         )
 
-        response = await self._read_control_message(reader)
+        response = await channel.receive()
         match response:
             case RegisteredMessage(
                 tunnel_id=tunnel_id,
@@ -136,30 +132,25 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
                 self._tunnel_id = tunnel_id
                 self._data_token = data_token
 
-                _log.info( "[client] registered tunnel_id=%s public_port=%s", tunnel_id, public_port)
+                _log.info("[client] registered tunnel_id=%s public_port=%s", tunnel_id, public_port)
 
             case ErrorMessage(
                 code=error_code,
                 message=error_message,
             ):
                 raise RuntimeError(
-                    "Tunnel registration failed: "
-                    f"code={error_code!r}, "
-                    f"message={error_message}"
+                    f"Tunnel registration failed: code={error_code!r}, message={error_message}"
                 )
 
             case _:
-                raise RuntimeError(
-                    "Unexpected registration response: "
-                    f"{type(response).__name__}"
-                )
+                raise RuntimeError(f"Unexpected registration response: {type(response).__name__}")
 
     async def _run_control_loop(self) -> None:
         """Последовательно читать и обрабатывать сообщения control-канала."""
-        reader, _ = self._require_control_connection()
+        channel = self._require_control_channel()
 
         while True:
-            message = await self._read_control_message(reader)
+            message = await channel.receive()
             await self._handle_control_message(message)
 
     async def _handle_control_message(
@@ -206,7 +197,6 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
         self._connection_tasks.add(task)
         task.add_done_callback(self._on_connection_task_done)
 
-
     def _on_connection_task_done(
         self,
         task: asyncio.Task[None],
@@ -229,28 +219,29 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
                 ),
             )
 
-    async def _serve_connection(
-        self,
-        connection_id: str,
-    ) -> None:
+    async def _serve_connection(self, connection_id: str) -> None:
         """Создать data-канал и связать его с локальным TCP-сервисом."""
+        data_channel: ControlChannel | None = None
         server_writer: asyncio.StreamWriter | None = None
         local_writer: asyncio.StreamWriter | None = None
 
         try:
-            server_reader, server_writer = await asyncio.open_connection(
-                self._config.server_host,
-                self._config.control_port,
+            data_channel = await ControlChannel.connect(
+                host=self._config.server_host,
+                port=self._config.control_port,
+                codec=self._codec,
             )
 
-            await self._send_control_message(
-                server_writer,
+            await data_channel.send(
                 DataMessage(
                     tunnel_id=self._require_tunnel_id(),
                     connection_id=connection_id,
                     data_token=self._require_data_token(),
                 ),
             )
+
+            server_reader, server_writer = data_channel.detach()
+            data_channel = None
 
             local_reader, local_writer = await asyncio.open_connection(
                 self._config.local_host,
@@ -269,20 +260,21 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
         except (ConnectionError, OSError) as error:
             _log.warning("[client] cannot serve connection_id=%s: %s", connection_id, error)
         finally:
+            if data_channel is not None:
+                await data_channel.close()
+
             if server_writer is not None:
                 await self._close_writer(server_writer)
 
             if local_writer is not None:
                 await self._close_writer(local_writer)
 
-    def _require_control_connection(
-        self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Вернуть control-соединение или сообщить об ошибке состояния."""
-        if self._control_reader is None or self._control_writer is None:
-            raise RuntimeError("Control connection is not established")
+    def _require_control_channel(self) -> ControlChannel:
+        """Вернуть открытый управляющий канал."""
+        if self._control_channel is None:
+            raise RuntimeError("Control channel is not established")
 
-        return self._control_reader, self._control_writer
+        return self._control_channel
 
     def _require_tunnel_id(self) -> str:
         """Вернуть идентификатор зарегистрированного туннеля."""
@@ -297,13 +289,3 @@ class TCPTunnelClient(ProtocolCodecMixin, BridgeMixin):
             raise RuntimeError("Data token is not available")
 
         return self._data_token
-
-    async def _close_writer(
-        self,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Закрыть TCP-поток и дождаться освобождения транспорта."""
-        writer.close()
-
-        with contextlib.suppress(ConnectionError, RuntimeError):
-            await writer.wait_closed()

@@ -43,10 +43,7 @@ def main(
         public_port=public_port,
     )
 
-    client = TCPTunnelClient(
-        codec=ControlMessageCodec(),
-        config=config,
-    )
+    client = TCPTunnelClient(codec=ControlMessageCodec(), config=config)
 
     asyncio.run(client.run())
 

@@ -4,6 +4,8 @@ import asyncio
 import abc
 from dataclasses import dataclass, field
 
+from port_tunnel_common.channels import ControlChannel
+
 
 class ABCTunnelRegistry(abc.ABC):
     """Реестр активных туннелей."""
@@ -50,7 +52,7 @@ class RegisteredTCPTunnel:
     data_token: str
     public_host: str
     public_port: int
-    control_writer: asyncio.StreamWriter
+    control_channel: ControlChannel
     public_server: asyncio.Server
     pending_public_connections: dict[str, PendingTCPConnection] = field(default_factory=dict)
 

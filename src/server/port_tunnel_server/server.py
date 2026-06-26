@@ -14,9 +14,11 @@ from port_tunnel_protocol import (
     NewConnectionMessage,
     RegisteredMessage,
     RegisterMessage,
+    InvalidControlMessageError,
 )
 from port_tunnel_common.codecs import ABCMessageCodec
-from port_tunnel_common.mixins import ProtocolCodecMixin, BridgeMixin
+from port_tunnel_common.mixins import BridgeMixin, StreamUtilsMixin
+from port_tunnel_common.channels import ControlChannel
 
 from .registry import PendingTCPConnection, RegisteredTCPTunnel, TCPTunnelRegistry, ABCTunnelRegistry
 from .authentication import ABCClientAuthenticator
@@ -34,9 +36,8 @@ class TCPTunnelServerConfig:
     public_host: str
 
 
-class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
+class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
     """Управляет control-соединениями, публичными портами и TCP-мостами."""
-
     def __init__(
         self,
         *,
@@ -68,30 +69,35 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
         writer: asyncio.StreamWriter,
     ) -> None:
         """Классифицировать новое клиентское соединение по первому сообщению."""
+        channel = ControlChannel(
+            reader=reader,
+            writer=writer,
+            codec=self._codec,
+        )
+
         try:
-            message = await self._read_control_message(reader)
+            message = await channel.receive()
         except Exception as error:
             _log.warning("[control] invalid initial message error_type=%s", type(error).__name__)
-            await self._close_writer(writer)
+            await channel.close()
             return
 
         match message:
             case RegisterMessage():
-                await self._handle_register(message, reader, writer)
+                await self._handle_register(message, channel)
 
             case DataMessage():
-                await self._handle_data(message, reader, writer)
+                raw_reader, raw_writer = channel.detach()
+                await self._handle_data(message, raw_reader, raw_writer)
 
             case _:
                 _log.warning("[control] unexpected initial message type=%s", type(message).__name__)
-                await self._close_writer(writer)
-
+                await channel.close()
 
     async def _handle_register(
         self,
         message: RegisterMessage,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
+        channel: ControlChannel,
     ) -> None:
         """Зарегистрировать туннель и запустить его публичный TCP-listener.
 
@@ -106,14 +112,13 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
         if not self._authenticator.authenticate(client_id, token):
             _log.info("[auth] registration rejected client_id=%s", client_id)
 
-            await self._send_control_message(
-                writer,
+            await channel.send(
                 ErrorMessage(
                     code="unauthorized",
                     message="invalid client credentials",
                 ),
             )
-            await self._close_writer(writer)
+            await channel.close()
             return
 
         tunnel_id = secrets.token_hex(8)
@@ -125,8 +130,7 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
                 public_port,
             )
         except OSError as error:
-            await self._send_control_message(
-                writer,
+            await channel.send(
                 ErrorMessage(
                     code="public_port_unavailable",
                     message=(
@@ -135,7 +139,7 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
                     ),
                 ),
             )
-            await self._close_writer(writer)
+            await channel.close()
             return
 
         data_token = secrets.token_urlsafe(32)
@@ -145,7 +149,7 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
             data_token=data_token,
             public_host=self._config.public_host,
             public_port=public_port,
-            control_writer=writer,
+            control_channel=channel,
             public_server=public_server,
         )
 
@@ -155,14 +159,13 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
             public_server.close()
             await public_server.wait_closed()
 
-            await self._send_control_message(
-                writer,
+            await channel.send(
                 ErrorMessage(
                     code="public_port_already_registered",
                     message=str(error),
                 ),
             )
-            await self._close_writer(writer)
+            await channel.close()
             return
 
         public_task: asyncio.Task[None] | None = None
@@ -170,8 +173,7 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
         try:
             # После добавления туннеля в реестр любая ошибка должна приводить
             # к его удалению и освобождению публичного порта.
-            await self._send_control_message(
-                writer,
+            await channel.send(
                 RegisteredMessage(
                     tunnel_id=tunnel_id,
                     data_token=data_token,
@@ -190,15 +192,20 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
                 public_task = asyncio.create_task(public_server.serve_forever())
 
                 try:
-                    # После регистрации control-соединение используется сервером
-                    # для отправки уведомлений клиенту. Здесь мы читаем его только
-                    # для обнаружения EOF - момента, когда клиент отключился.
-                    while await reader.read(1024):
-                        pass
-                except (ConnectionError, asyncio.IncompleteReadError):
-                    # Разрыв сети и принудительное завершение клиента также означают,
-                    # что туннель больше нельзя считать активным.
-                    pass
+                    await self._run_registered_control_loop(
+                        tunnel_id=tunnel_id,
+                        channel=channel,
+                    )
+                except (
+                    asyncio.IncompleteReadError,
+                    ConnectionError,
+                    InvalidControlMessageError,
+                ) as error:
+                    _log.info(
+                        "[control] channel closed tunnel_id=%s reason=%s",
+                        tunnel_id,
+                        type(error).__name__,
+                    )
         finally:
             if public_task is not None:
                 public_task.cancel()
@@ -237,8 +244,7 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
         _log.info(f"[public] new connection tunnel_id={tunnel_id} connection_id={connection_id}")
 
         try:
-            await self._send_control_message(
-                tunnel.control_writer,
+            await tunnel.control_channel.send(
                 NewConnectionMessage(
                     tunnel_id=tunnel_id,
                     connection_id=connection_id,
@@ -290,9 +296,7 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
                 writer,
             )
         finally:
-            await self._close_writer(
-                public_connection.writer,
-            )
+            await self._close_writer(public_connection.writer)
             await self._close_writer(writer)
 
         _log.info(f"[data] bridge closed tunnel_id={tunnel_id} connection_id={connection_id}")
@@ -311,7 +315,7 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
             await self._close_writer(connection.writer)
 
         tunnel.pending_public_connections.clear()
-        await self._close_writer(tunnel.control_writer)
+        await tunnel.control_channel.close()
 
         _log.info(
             "[control] tunnel unregistered tunnel_id=%s public_port=%s",
@@ -319,8 +323,19 @@ class TCPTunnelServer(ProtocolCodecMixin, BridgeMixin):
             tunnel.public_port,
         )
 
-    async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
-        """Идемпотентно инициировать закрытие TCP-потока и дождаться его."""
-        writer.close()
-        with contextlib.suppress(ConnectionError, RuntimeError):
-            await writer.wait_closed()
+    async def _run_registered_control_loop(
+        self,
+        *,
+        tunnel_id: str,
+        channel: ControlChannel,
+    ) -> None:
+        """Последовательно читать сообщения зарегистрированного клиента."""
+        while True:
+            message = await channel.receive()
+
+            _log.warning(
+                "[control] unexpected message "
+                "tunnel_id=%s type=%s",
+                tunnel_id,
+                type(message).__name__,
+            )
