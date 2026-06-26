@@ -1,7 +1,7 @@
 """Состояние и реестр активных TCP-туннелей на сервере."""
 
-import asyncio
 import abc
+import asyncio
 from dataclasses import dataclass, field
 
 from port_tunnel_common.channels import ControlChannel
@@ -10,15 +10,19 @@ from port_tunnel_common.channels import ControlChannel
 class ABCTunnelRegistry(abc.ABC):
     """Реестр активных туннелей."""
 
+    @abc.abstractmethod
     async def add(self, tunnel: RegisteredTCPTunnel) -> None:
         """Добавить туннель и запретить повторное использование public port."""
 
+    @abc.abstractmethod
     async def remove(self, tunnel_id: str) -> RegisteredTCPTunnel | None:
         """Удалить туннель из всех индексов и вернуть его состояние."""
 
+    @abc.abstractmethod
     async def get_by_id(self, tunnel_id: str) -> RegisteredTCPTunnel | None:
         """Найти активный туннель по его внутреннему идентификатору."""
 
+    @abc.abstractmethod
     async def put_pending_public_connection(
         self,
         tunnel_id: str,
@@ -27,6 +31,7 @@ class ABCTunnelRegistry(abc.ABC):
     ) -> bool:
         """Сохранить внешнее соединение."""
 
+    @abc.abstractmethod
     async def pop_pending_public_connection(
         self,
         tunnel_id: str,
@@ -58,14 +63,7 @@ class RegisteredTCPTunnel:
 
 
 class TCPTunnelRegistry(ABCTunnelRegistry):
-    """Потокобезопасный для asyncio реестр активных TCP-туннелей.
-
-    Реестр решает две задачи:
-
-    * хранит зарегистрированные туннели по `tunnel_id`;
-    * временно хранит внешние подключения до прихода соответствующего
-      data-соединения от клиентского агента.
-    """
+    """Потокобезопасный для asyncio реестр активных TCP-туннелей."""
 
     def __init__(self) -> None:
         self._tunnels_by_id: dict[str, RegisteredTCPTunnel] = {}

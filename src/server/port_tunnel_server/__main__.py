@@ -8,10 +8,10 @@ from typing import Any
 
 import typer
 from port_tunnel_common.codecs import ControlMessageCodec
+from port_tunnel_common.setups.logging import setup_logging
 
-from .setups.logging import setup_logging
-from .server import TCPTunnelServer, TCPTunnelServerConfig
 from .authentication import StaticTokenAuthenticator
+from .server import TCPTunnelServer, TCPTunnelServerConfig
 
 
 setup_logging(logging.INFO)
@@ -59,11 +59,7 @@ async def async_main(
 
 
 def _load_client_tokens() -> dict[str, str]:
-    """Загрузить разрешённые токены из PORT_TUNNEL_TOKENS.
-
-    Значение переменной должно быть JSON-объектом вида:
-    {"client-id": "token"}
-    """
+    """Загрузить разрешённые токены из `PORT_TUNNEL_TOKENS`."""
     raw_tokens = os.environ.get("PORT_TUNNEL_TOKENS")
     if raw_tokens is None:
         raise RuntimeError("PORT_TUNNEL_TOKENS is not configured")
@@ -76,9 +72,7 @@ def _load_client_tokens() -> dict[str, str]:
 
     for client_id, token in parsed.items():
         if not isinstance(client_id, str) or not isinstance(token, str):
-            raise RuntimeError(
-                "PORT_TUNNEL_TOKENS must map string client IDs to string tokens"
-            )
+            raise RuntimeError("PORT_TUNNEL_TOKENS must map string client IDs to string tokens")
 
         if not client_id or not token:
             raise RuntimeError("Client IDs and tokens must not be empty")

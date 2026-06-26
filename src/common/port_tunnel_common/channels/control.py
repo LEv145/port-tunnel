@@ -1,23 +1,16 @@
+"""Типизированный управляющий канал Port Tunnel."""
+
 import asyncio
 import contextlib
 from typing import Self
 
-from port_tunnel_protocol import (
-    ControlMessage,
-    ControlMessageBase,
-    parse_control_message,
-    serialize_control_message,
-)
+from port_tunnel_protocol import ControlMessage, ControlMessageBase, parse_control_message, serialize_control_message
 
 from port_tunnel_common.codecs import ABCMessageCodec
 
 
 class ControlChannel:
-    """Канал управляющего протокола.
-
-    Канал владеет парой `StreamReader` и `StreamWriter` и предоставляет
-    безопасные операции чтения и отправки управляющих сообщений.
-    """
+    """Владеет TCP-потоками и передаёт типизированные управляющие сообщения."""
 
     def __init__(
         self,
@@ -29,10 +22,8 @@ class ControlChannel:
         self._reader = reader
         self._writer = writer
         self._codec = codec
-
         self._write_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
-
         self._read_in_progress = False
         self._closed = False
         self._detached = False
@@ -41,18 +32,15 @@ class ControlChannel:
     async def connect(cls, *, host: str, port: int, codec: ABCMessageCodec) -> Self:
         """Открыть TCP-соединение и создать управляющий канал."""
         reader, writer = await asyncio.open_connection(host, port)
-
         return cls(reader=reader, writer=writer, codec=codec)
 
     async def send(self, message: ControlMessageBase) -> None:
         """Последовательно отправить типизированное сообщение."""
         self._ensure_active()
-
         payload = serialize_control_message(message)
 
         async with self._write_lock:
             self._ensure_active()
-
             await self._codec.send_json(self._writer, payload)
 
     async def receive(self) -> ControlMessage:
@@ -71,12 +59,7 @@ class ControlChannel:
             self._read_in_progress = False
 
     def detach(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Передать потоки вызывающему коду для raw TCP-обмена.
-
-        После вызова канал больше нельзя использовать для `send`,
-        `receive` или `close`. Ответственность за закрытие writer
-        переходит к вызывающему коду.
-        """
+        """Передать потоки вызывающему коду для raw TCP-обмена."""
         self._ensure_active()
 
         if self._read_in_progress:
@@ -86,7 +69,6 @@ class ControlChannel:
             raise ControlChannelStateError("Cannot detach while send() is active")
 
         self._detached = True
-
         return self._reader, self._writer
 
     async def close(self) -> None:
@@ -99,12 +81,10 @@ class ControlChannel:
                 raise ControlChannelStateError("Detached channel no longer owns its streams")
 
             self._closed = True
+            self._writer.close()
 
-            async with self._write_lock:
-                self._writer.close()
-
-                with contextlib.suppress(ConnectionError, RuntimeError):
-                    await self._writer.wait_closed()
+            with contextlib.suppress(ConnectionError, RuntimeError):
+                await self._writer.wait_closed()
 
     @property
     def is_closing(self) -> bool:
@@ -117,7 +97,6 @@ class ControlChannel:
         return self._writer.get_extra_info("peername")
 
     def _ensure_active(self) -> None:
-        """Проверить, что канал владеет открытыми потоками."""
         if self._detached:
             raise ControlChannelStateError("Control channel streams have been detached")
 

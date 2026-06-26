@@ -6,9 +6,9 @@ import os
 
 import typer
 from port_tunnel_common.codecs import ControlMessageCodec
+from port_tunnel_common.setups.logging import setup_logging
 
 from .client import TCPTunnelClient, TCPTunnelClientConfig
-from .setups.logging import setup_logging
 
 
 setup_logging(logging.INFO)

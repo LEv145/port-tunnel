@@ -5,22 +5,21 @@ import hmac
 import contextlib
 import secrets
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 
+from port_tunnel_common.channels import ControlChannel, ControlChannelStateError
+from port_tunnel_common.codecs import ABCMessageCodec
+from port_tunnel_common.mixins import BridgeMixin, StreamUtilsMixin
 from port_tunnel_protocol import (
     DataMessage,
     ErrorMessage,
     NewConnectionMessage,
     RegisteredMessage,
     RegisterMessage,
-    InvalidControlMessageError,
 )
-from port_tunnel_common.codecs import ABCMessageCodec
-from port_tunnel_common.mixins import BridgeMixin, StreamUtilsMixin
-from port_tunnel_common.channels import ControlChannel, ControlChannelStateError
 
-from .registry import PendingTCPConnection, RegisteredTCPTunnel, TCPTunnelRegistry, ABCTunnelRegistry
+from .registry import ABCTunnelRegistry, PendingTCPConnection, RegisteredTCPTunnel, TCPTunnelRegistry
 from .authentication import ABCClientAuthenticator
 
 
@@ -47,6 +46,7 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
     ) -> None:
         self._config = config
         self._codec = codec
+
         self._authenticator = authenticator
         self._registry: ABCTunnelRegistry = TCPTunnelRegistry()
 
@@ -58,32 +58,18 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
             self._config.control_port,
         )
 
-        _log.info(f"[server] control listening on {self._config.control_host}:{self._config.control_port}")
+        _log.info("[server] control listening on %s:%s", self._config.control_host, self._config.control_port)
 
         async with control_server:
             await control_server.serve_forever()
 
-    async def _handle_control(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
+    async def _handle_control(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Классифицировать новое клиентское соединение по первому сообщению."""
-        channel = ControlChannel(
-            reader=reader,
-            writer=writer,
-            codec=self._codec,
-        )
+        channel = ControlChannel(reader=reader, writer=writer, codec=self._codec)
 
         try:
             message = await channel.receive()
-        except (
-            asyncio.IncompleteReadError,
-            ConnectionError,
-            OSError,
-            UnicodeDecodeError,
-            ValueError,
-        ) as error:
+        except (asyncio.IncompleteReadError, ConnectionError, OSError, UnicodeDecodeError, ValueError) as error:
             _log.warning("[control] invalid initial message error_type=%s", type(error).__name__)
             await channel.close()
             return
@@ -100,29 +86,14 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
                 _log.warning("[control] unexpected initial message type=%s", type(message).__name__)
                 await channel.close()
 
-    async def _handle_register(
-        self,
-        message: RegisterMessage,
-        channel: ControlChannel,
-    ) -> None:
-        """Зарегистрировать туннель и запустить его публичный TCP-listener.
-
-        Управляющий `writer` сохраняется на всё время жизни туннеля. Через него
-        сервер сообщает клиенту о новых внешних подключениях. Завершение этого
-        соединения инициирует очистку публичного listener и состояния туннеля.
-        """
+    async def _handle_register(self, message: RegisterMessage, channel: ControlChannel) -> None:
+        """Зарегистрировать туннель и обслуживать его управляющий канал."""
         public_port = message.public_port
         client_id = message.client_id
-        token = message.token
 
-        if not self._authenticator.authenticate(client_id, token):
+        if not self._authenticator.authenticate(client_id, message.token):
             _log.info("[auth] registration rejected client_id=%s", client_id)
-
-            await self._send_error_and_close(
-                channel=channel,
-                code="unauthorized",
-                message="invalid client credentials",
-            )
+            await self._send_error_and_close(channel, code="unauthorized", message="invalid client credentials")
             return
 
         tunnel_id = secrets.token_hex(8)
@@ -135,7 +106,7 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
             )
         except OSError as error:
             await self._send_error_and_close(
-                channel=channel,
+                channel,
                 code="public_port_unavailable",
                 message=f"cannot listen public port {public_port}: {error}",
             )
@@ -157,9 +128,8 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
         except ValueError as error:
             public_server.close()
             await public_server.wait_closed()
-
             await self._send_error_and_close(
-                channel=channel,
+                channel,
                 code="public_port_already_registered",
                 message=str(error),
             )
@@ -168,16 +138,9 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
         public_task: asyncio.Task[None] | None = None
 
         try:
-            # После добавления туннеля в реестр любая ошибка должна приводить
-            # к его удалению и освобождению публичного порта.
             await channel.send(
-                RegisteredMessage(
-                    tunnel_id=tunnel_id,
-                    data_token=data_token,
-                    public_port=public_port,
-                ),
+                RegisteredMessage(tunnel_id=tunnel_id, data_token=data_token, public_port=public_port),
             )
-
             _log.info(
                 "[control] tunnel registered client_id=%s tunnel_id=%s public_port=%s",
                 client_id,
@@ -186,7 +149,10 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
             )
 
             async with public_server:
-                public_task = asyncio.create_task(public_server.serve_forever())
+                public_task = asyncio.create_task(
+                    public_server.serve_forever(),
+                    name=f"public-listener-{tunnel_id}",
+                )
 
                 try:
                     await self._run_registered_control_loop(
@@ -196,7 +162,10 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
                 except (
                     asyncio.IncompleteReadError,
                     ConnectionError,
-                    InvalidControlMessageError,
+                    OSError,
+                    UnicodeDecodeError,
+                    ValueError,
+                    ControlChannelStateError,
                 ) as error:
                     _log.info(
                         "[control] channel closed tunnel_id=%s reason=%s",
@@ -220,15 +189,11 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
         """Принять внешнего пользователя и запросить data-канал у клиента."""
         tunnel = await self._registry.get_by_id(tunnel_id)
         if tunnel is None:
-            _log.info(f"[public] unknown tunnel_id={tunnel_id}")
+            _log.info("[public] unknown tunnel_id=%s", tunnel_id)
             await self._close_writer(writer)
             return
 
         connection_id = secrets.token_hex(8)
-
-        # Внешний сокет нельзя сразу связать с локальным сервисом: сервер не
-        # имеет прямого доступа к сети клиента. Он временно сохраняется, пока
-        # клиент не создаст исходящее data-соединение.
         added = await self._registry.put_pending_public_connection(
             tunnel_id,
             connection_id,
@@ -238,17 +203,14 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
             await self._close_writer(writer)
             return
 
-        _log.info(f"[public] new connection tunnel_id={tunnel_id} connection_id={connection_id}")
+        _log.info("[public] new connection tunnel_id=%s connection_id=%s", tunnel_id, connection_id)
 
         try:
             await tunnel.control_channel.send(
-                NewConnectionMessage(
-                    tunnel_id=tunnel_id,
-                    connection_id=connection_id,
-                ),
+                NewConnectionMessage(tunnel_id=tunnel_id, connection_id=connection_id),
             )
         except (ConnectionError, OSError, ControlChannelStateError) as error:
-            _log.info(f"[public] cannot notify client: {error}")
+            _log.info("[public] cannot notify client: %s", error)
             await self._registry.pop_pending_public_connection(tunnel_id, connection_id)
             await self._close_writer(writer)
 
@@ -261,15 +223,14 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
         """Сопоставить data-канал клиента с ожидающим внешним соединением."""
         tunnel_id = message.tunnel_id
         connection_id = message.connection_id
-        data_token = message.data_token
-
         tunnel = await self._registry.get_by_id(tunnel_id)
+
         if tunnel is None:
             _log.warning("[auth] data connection rejected: unknown tunnel")
             await self._close_writer(writer)
             return
 
-        if not hmac.compare_digest(tunnel.data_token, data_token):
+        if not hmac.compare_digest(tunnel.data_token, message.data_token):
             _log.warning("[auth] data connection rejected tunnel_id=%s", tunnel_id)
             await self._close_writer(writer)
             return
@@ -279,27 +240,22 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
             connection_id,
         )
         if public_connection is None:
-            _log.info(f"[data] unknown tunnel_id={tunnel_id} connection_id={connection_id}")
+            _log.info("[data] unknown tunnel_id=%s connection_id=%s", tunnel_id, connection_id)
             await self._close_writer(writer)
             return
 
-        _log.info(f"[data] bridge started tunnel_id={tunnel_id} connection_id={connection_id}")
+        _log.info("[data] bridge started tunnel_id=%s connection_id=%s", tunnel_id, connection_id)
 
         try:
-            await self._bridge(
-                public_connection.reader,
-                public_connection.writer,
-                reader,
-                writer,
-            )
+            await self._bridge(public_connection.reader, public_connection.writer, reader, writer)
         finally:
             await self._close_writer(public_connection.writer)
             await self._close_writer(writer)
 
-        _log.info(f"[data] bridge closed tunnel_id={tunnel_id} connection_id={connection_id}")
+        _log.info("[data] bridge closed tunnel_id=%s connection_id=%s", tunnel_id, connection_id)
 
     async def _unregister_tunnel(self, tunnel_id: str) -> None:
-        """Удалить туннель, закрыть listener и незавершённые подключения."""
+        """Удалить туннель и закрыть все принадлежащие ему ресурсы."""
         tunnel = await self._registry.remove(tunnel_id)
         if tunnel is None:
             return
@@ -308,7 +264,7 @@ class TCPTunnelServer(BridgeMixin, StreamUtilsMixin):
         await tunnel.public_server.wait_closed()
 
         for connection_id, connection in list(tunnel.pending_public_connections.items()):
-            _log.info(f"[control] close pending connection_id={connection_id}")
+            _log.info("[control] close pending connection_id=%s", connection_id)
             await self._close_writer(connection.writer)
 
         tunnel.pending_public_connections.clear()
