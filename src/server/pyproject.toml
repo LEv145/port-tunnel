@@ -3,10 +3,18 @@ name = "port-tunnel-server"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-    "port-tunnel-protocol",
     "port-tunnel-common",
+    "port-tunnel-protocol",
+    "typer>=0.26.7",
 ]
 
 [tool.uv.sources]
-port-tunnel-protocol = { workspace = true }
 port-tunnel-common = { workspace = true }
+port-tunnel-protocol = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.11.24,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""

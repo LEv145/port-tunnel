@@ -1,13 +1,18 @@
 [project]
 name = "port-tunnel"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reverse TCP tunneling service"
+readme = "README.md"
 requires-python = ">=3.14"
-dependencies = [
-    "colorlog>=6.10.1",
-    "pydantic>=2.13.4",
-    "typer>=0.26.7",
-]
+dependencies = []
+
+[tool.uv]
+package = false
 
 [tool.uv.workspace]
-members = ["src/*"]
+members = [
+    "src/client",
+    "src/server",
+    "src/common",
+    "src/protocol",
+]
