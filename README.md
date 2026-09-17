@@ -1,34 +1,34 @@
 # Port Tunnel
 
-Сервис обратного TCP-туннелирования, написанный на Python и asyncio.
+A reverse TCP tunneling service written in Python and asyncio.
 
-Он предоставляет доступ к TCP-сервисам, работающим за NAT, через сервер с общедоступным IP-адресом, используя отдельные соединения для управления и передачи данных.
+It provides access to TCP services running behind NAT via a server with a public IP address, using separate connections for management and data transfer.
 
-## Возможности
+## Features
 
-- Несколько одновременных TCP-туннелей
-- Отдельные управляющие и data-соединения
-- Типизированный управляющий протокол на Pydantic
-- Авторизация клиентов по постоянным токенам
-- Временный `data_token` для каждого туннеля
+- Multiple simultaneous TCP tunnels
+- Separate management and data connections
+- Typed management protocol based on Pydantic
+- Client authorization via persistent tokens
+- Temporary `data_token` for each tunnel
 - Heartbeat `ping/pong`
-- Автоматическое удаление недоступного туннеля
-- Освобождение публичного порта
-- Закрытие pending- и active-соединений при удалении туннеля
-- Ограничение размера управляющего сообщения
-- Двунаправленная передача произвольного TCP-трафика
+- Automatic deletion of an unavailable tunnel
+- Release of the public port
+- Closure of pending and active connections when the tunnel is deleted
+- Limitation of the control message size
+- Bidirectional transmission of arbitrary TCP traffic
 
-UDP, TLS и автоматическое переподключение клиента в текущей версии не реализованы.
+UDP, TLS, and automatic client reconnection are not implemented in the current version.
 
-## Локальный запуск
+## Local run
 
-Из корня проекта выполните:
+From the project root, run:
 
 ```powershell
 uv sync --all-packages
 ```
 
-### Сервер
+### Server
 
 ```powershell
 $env:PORT_TUNNEL_TOKENS='{"lev":"secret-token"}'
@@ -41,13 +41,13 @@ uv run --package port-tunnel-server python -m port_tunnel_server `
     --heartbeat-timeout 45
 ```
 
-### Локальный сервис
+### Local service
 
 ```powershell
 python -m http.server 8080
 ```
 
-### Клиент
+### Client
 
 ```powershell
 $env:PORT_TUNNEL_TOKEN='secret-token'
@@ -60,10 +60,10 @@ uv run --package port-tunnel-client python -m port_tunnel_client `
     --public-port 30001
 ```
 
-### Проверка
+### Check
 
 ```powershell
 curl.exe http://127.0.0.1:30001
 ```
 
-Подробная схема компонентов и соединений приведена в [ARCHITECTURE.md](ARCHITECTURE.md).
+A detailed diagram of the components and connections is provided in [ARCHITECTURE.md](ARCHITECTURE.md).
